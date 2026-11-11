@@ -1,6 +1,6 @@
 [project]
 name = "athena-ros2-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Minimal MCP server for the Athena ROS 2 Codex plugin"
 requires-python = ">=3.11"
 dependencies = ["mcp>=2,<3"]

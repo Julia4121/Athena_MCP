@@ -1,6 +1,6 @@
 # Athena ROS 2 for Codex
 
-This repository packages one ROS 2 development skill and a minimal local MCP server as a Codex plugin. The skill includes an attributed copy of the [Henki ROS 2 Best Practices](https://github.com/henki-robotics/henki_ros2_best_practices). The server connects over stdio and exposes no tools yet.
+This repository packages one ROS 2 development skill and a minimal local MCP server as a Codex plugin. The [skill](plugins/athena-ros2/skills/ros2-development/SKILL.md) contains the [Henki ROS 2 Best Practices](https://github.com/henki-robotics/henki_ros2_best_practices) directly, with attribution and the upstream license. The server connects over stdio and exposes no tools yet.
 
 ## Install
 
@@ -12,6 +12,8 @@ codex plugin add athena-ros2@athena-mcp
 ```
 
 Restart Codex after installation. The `ros2-development` skill is available automatically for ROS 2 work and can also be selected explicitly. The `athena-ros2` MCP server should appear in Codex's MCP server list with no tools.
+
+To update an existing installation, run `codex plugin marketplace upgrade athena-mcp` followed by `codex plugin add athena-ros2@athena-mcp`, then restart Codex.
 
 ## Local development
 
