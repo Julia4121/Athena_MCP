@@ -17,6 +17,7 @@ def generate_launch_description():
         "log_dir",
         "status_file",
         "resource_root",
+        "px4_parameters",
     )
     arguments = [DeclareLaunchArgument(name) for name in names]
     command = []

@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -19,6 +20,12 @@ from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
 
 from simulation import config
+from simulation.evidence import (
+    contact_topics,
+    list_topics,
+    select_topics,
+    wait_for_recording,
+)
 
 
 class SpawnPose(BaseModel):
@@ -214,6 +221,18 @@ def _preflight(workspace: Path, drone: Path, world: Path, timeout_seconds: int) 
         raise ValueError("The X500 drone SDF is missing PX4 sensors: " + ", ".join(sorted(missing)))
 
 
+def _validate_px4_parameters(values: dict[str, int | float] | None) -> dict[str, int | float]:
+    parameters = values or {}
+    for name, value in parameters.items():
+        if re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", name) is None:
+            raise ValueError(f"Invalid PX4 parameter name: {name!r}.")
+        if name == "UXRCE_DDS_SYNCT":
+            raise ValueError("UXRCE_DDS_SYNCT is managed by the Gazebo clock scaffold.")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"PX4 parameter {name} needs a finite numeric value.")
+    return parameters
+
+
 def _result_path(run_dir: Path) -> Path:
     return run_dir / "result.json"
 
@@ -227,6 +246,7 @@ def run_test(
     test_argv: list[str],
     timeout_seconds: int = config.TEST_TIMEOUT_SECONDS,
     record_topics: list[str] | None = None,
+    px4_parameters: dict[str, int | float] | None = None,
 ) -> dict[str, object]:
     """Return observed execution facts and artifacts, without a causal verdict."""
 
@@ -250,6 +270,7 @@ def run_test(
         "timed_out": False,
         "timeout_phase": None,
         "diagnostics": [],
+        "recording": {"ready": False, "topics": [], "not_discovered_at_start": []},
         "artifacts": {"result": str(_result_path(run_dir))},
     }
     processes: dict[str, subprocess.Popen[bytes]] = {}
@@ -261,6 +282,7 @@ def run_test(
             raise ValueError("test_argv must be a non-empty list of command arguments.")
         if record_topics and any(not topic.startswith("/") for topic in record_topics):
             raise ValueError("record_topics must contain absolute ROS topic names.")
+        parameters = _validate_px4_parameters(px4_parameters)
         _preflight(workspace, drone, world, timeout_seconds)
         # PX4, XRCE, and the Gazebo service names are shared across workspaces.
         lock = Path("/tmp/athena-ros2-simulation.lock").open("w")
@@ -285,8 +307,15 @@ def run_test(
             "test_argv": test_argv,
             "timeout_seconds": timeout_seconds,
             "record_topics": record_topics or [],
+            "px4_parameters": parameters,
         }
         base_env = _source_env([Path("/opt/ros/jazzy/setup.bash"), workspace / "install/setup.bash"], os.environ.copy())
+        px4_msgs = subprocess.run(
+            ["ros2", "pkg", "prefix", "px4_msgs"], env=base_env,
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if px4_msgs.returncode:
+            raise RuntimeError("px4_msgs is unavailable in the ROS workspace; build it with colcon before running a PX4 test.")
         result["last_phase"] = "scaffold_build"
         build_command = [
             "colcon", "--log-base", str(run_dir / "scaffold_colcon_logs"),
@@ -318,6 +347,7 @@ def run_test(
             f"spawn_z:={spawn_pose.z_m}", f"spawn_yaw:={spawn_pose.yaw_rad}",
             f"log_dir:={run_dir / 'process_logs'}", f"status_file:={startup_status_path}",
             f"resource_root:={config.MODEL_ROOT}",
+            f"px4_parameters:={json.dumps(parameters, separators=(',', ':'))}",
         ]
         bringup, log = _start(bringup_command, env=run_env, cwd=workspace, log_path=run_dir / "bringup.log")
         processes["bringup"] = bringup
@@ -342,6 +372,41 @@ def run_test(
             result["timed_out"] = True
             result["timeout_phase"] = "bringup"
             raise TimeoutError("sim_bringup did not become ready before the startup deadline.")
+        result["last_phase"] = "evidence_recording"
+        available = list_topics(run_env)
+        contacts = contact_topics(effective_drone)
+        topics, missing = select_topics(available, record_topics or [])
+        result["recording"] = {"ready": False, "topics": topics, "not_discovered_at_start": missing}
+        status_topic = next((topic for topic in topics if topic.startswith("/fmu/out/vehicle_status")), None)
+        if status_topic is None:
+            raise RuntimeError("PX4 vehicle status topic is unavailable for recorder readiness.")
+        bag, log = _start(
+            ["ros2", "bag", "record", "--storage", "mcap", "-o", str(run_dir / "bag"), "--topics", *topics],
+            env=run_env, cwd=workspace, log_path=run_dir / "bag.log",
+        )
+        processes["bag"] = bag
+        logs.append(log)
+        result["artifacts"]["bag"] = str(run_dir / "bag")
+        result["artifacts"]["bag_log"] = str(run_dir / "bag.log")
+        if not wait_for_recording(bag, status_topic, run_env):
+            raise RuntimeError("Rosbag did not subscribe to PX4 vehicle status; see bag.log.")
+        result["recording"]["ready"] = True
+        if contacts:
+            contact_ready = run_dir / "contact_monitor_ready.json"
+            monitor, log = _start(
+                ["ros2", "run", "sim_bringup", "contact_monitor", "--output", str(run_dir / "contacts.jsonl"),
+                 "--ready-file", str(contact_ready), *[part for topic in contacts for part in ("--topic", topic)]],
+                env=run_env, cwd=workspace, log_path=run_dir / "contact_monitor.log",
+            )
+            processes["contact_monitor"] = monitor
+            logs.append(log)
+            result["artifacts"]["contacts"] = str(run_dir / "contacts.jsonl")
+            result["artifacts"]["contact_monitor_log"] = str(run_dir / "contact_monitor.log")
+            monitor_deadline = time.monotonic() + 15
+            while time.monotonic() < monitor_deadline and not contact_ready.is_file() and monitor.poll() is None:
+                time.sleep(0.25)
+            if not contact_ready.is_file():
+                raise RuntimeError("Contact monitor did not become ready; see contact_monitor.log.")
         result["last_phase"] = "application_launch"
         app_command = [
             "ros2", "launch", application_launch.package, application_launch.file,
@@ -354,15 +419,6 @@ def run_test(
         time.sleep(1)
         if app.poll() is not None:
             raise RuntimeError(f"Application launch exited before the test started ({app.returncode}).")
-        if record_topics:
-            try:
-                bag, log = _start(["ros2", "bag", "record", "-o", str(run_dir / "bag"), "--topics", *record_topics], env=run_env, cwd=workspace, log_path=run_dir / "bag.log")
-                processes["bag"] = bag
-                logs.append(log)
-                result["artifacts"]["bag"] = str(run_dir / "bag")
-                result["artifacts"]["bag_log"] = str(run_dir / "bag.log")
-            except OSError as exc:
-                result["diagnostics"].append(f"Unable to start optional rosbag recorder: {exc}")
         result["last_phase"] = "test"
         test, log = _start(test_argv, env=run_env, cwd=workspace, log_path=run_dir / "test.log")
         processes["test"] = test
@@ -400,6 +456,10 @@ def run_test(
             result["diagnostics"].append("Some bringup processes remained after cleanup; inspect cleanup_remaining_processes.")
         for log in logs:
             log.close()
+        bag_path = run_dir / "bag"
+        result["recording"]["metadata_written"] = (bag_path / "metadata.yaml").is_file()
+        if result["recording"]["ready"] and not result["recording"]["metadata_written"]:
+            result["diagnostics"].append("Rosbag did not write metadata.yaml; inspect bag.log.")
         final_status = _read_status(startup_status_path)
         if final_status:
             result["readiness"] = final_status.get("readiness", result["readiness"])

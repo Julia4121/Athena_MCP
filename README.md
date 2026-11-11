@@ -4,7 +4,7 @@ This repository packages ROS 2 development and Gazebo testing skills with a loca
 
 ## Install
 
-You need access to this private GitHub repository, [Codex](https://developers.openai.com/codex), Python 3.11 or newer, and [`uv`](https://docs.astral.sh/uv/) on your `PATH`. `build_world` and `run_simulation_test` run in the same container as Codex. Simulation requires ROS 2 Jazzy, Gazebo Harmonic, PX4 1.16 SITL, the Micro XRCE-DDS agent, `ros_gz_bridge`, and `colcon`. The existing `sim_agent` Docker image provides that stack, but its LangGraph workflow is not used.
+You need access to this private GitHub repository, [Codex](https://developers.openai.com/codex), Python 3.11 or newer, and [`uv`](https://docs.astral.sh/uv/) on your `PATH`. `build_world` and `run_simulation_test` run in the same container as Codex. Simulation requires ROS 2 Jazzy, Gazebo Harmonic, PX4 1.16 SITL, the Micro XRCE-DDS agent, `ros_gz_bridge`, and `colcon`; build `px4_msgs` in the ROS workspace before running a PX4 test. The existing `sim_agent` Docker image provides the simulator stack, but its LangGraph workflow is not used.
 
 ```bash
 codex plugin marketplace add ssh://git@github.com/Julia4121/Athena_MCP.git
@@ -14,9 +14,11 @@ codex plugin add athena-ros2@athena-mcp
 Restart Codex after installation. The `ros2-development` and `ros2-gazebo-testing` skills can be selected explicitly and are also discoverable during relevant work. The `athena-ros2` MCP server exposes exactly two tools:
 
 - `build_world` adds pillars, tables, chairs, and cardboard boxes to a copy of an empty basement or tripleA room SDF. The output must be a distinct path inside the ROS workspace, where it can remain with the regression test.
-- `run_simulation_test` starts a supplied X500-compatible drone and room world, then a ROS application launch file and a Codex-authored test command. Build the ROS workspace with `colcon` before calling it. The tool returns observed readiness, exit codes, timeout information, and paths to logs and requested bag data under `<workspace>/agent/athena/simulation/`.
+- `run_simulation_test` starts a supplied X500-compatible drone and room world, then a ROS application launch file and a Codex-authored test command. Build the ROS workspace with `colcon` before calling it. Optional `px4_parameters` are applied at startup and logged with observed values. The tool starts an MCAP recorder before the application and test, records a small default PX4 evidence set and drone contacts, and returns readiness, exit codes, timeouts, and artifact paths under `<workspace>/agent/athena/simulation/`. Use `record_topics` to add feature-specific topics; battery is not recorded by default.
 
 The runner reports observations rather than diagnosing the root cause of a failed scenario. Codex uses its authored assertions, logs, and telemetry to decide whether the ROS implementation, scenario, or test needs repair.
+
+The bundled `sim_bringup.test_support` Python module provides PX4 topic discovery, message waits, command acknowledgements, and a pausable control-message stream for Codex-authored tests. It contains no route or assertion logic. A command acknowledgement confirms receipt, so tests should also check the resulting vehicle state and motion.
 
 The input SDFs stay unchanged. When both the room and drone load Gazebo's Sensors system, the runner records a drone copy with the duplicate declaration removed. PX4's XRCE time synchronization is disabled for SITL startup; tests should use `/clock` and check PX4 timestamp semantics explicitly.
 

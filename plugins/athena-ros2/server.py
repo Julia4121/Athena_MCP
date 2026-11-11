@@ -1,11 +1,9 @@
 """Local MCP server for Athena ROS 2 tools."""
 
 from mcp.server import MCPServer
-
 from simulation import config
 from simulation.runner import ApplicationLaunch, SpawnPose, run_test
 from simulation.world import WorldObject, build_world_file
-
 
 mcp = MCPServer("athena-ros2")
 
@@ -32,6 +30,7 @@ def run_simulation_test(
     test_argv: list[str],
     timeout_seconds: int = config.TEST_TIMEOUT_SECONDS,
     record_topics: list[str] | None = None,
+    px4_parameters: dict[str, int | float] | None = None,
 ) -> dict[str, object]:
     """Run a Codex-authored test with Gazebo, PX4, and ROS; return observed evidence."""
 
@@ -44,6 +43,7 @@ def run_simulation_test(
         test_argv,
         timeout_seconds,
         record_topics,
+        px4_parameters,
     )
 
 
