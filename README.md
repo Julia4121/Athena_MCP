@@ -24,9 +24,7 @@ The [ROS development skill](plugins/athena-ros2/skills/ros2-development/SKILL.md
 
 The copied `sim_bringup.test_support` module provides PX4 topic discovery, message waits, command acknowledgements, and a pausable control-message stream. An acknowledgement confirms receipt, so tests should check the resulting vehicle state and motion. The input SDFs stay unchanged; the runner writes a normalized drone copy if both SDFs load Gazebo's Sensors system. Tests should use `/clock` and check PX4 timestamp semantics. The plugin bundles resource models for SDFs produced by the self-hosted configurator; see [model attribution](plugins/athena-ros2/THIRD_PARTY_MODELS.md).
 
-The separate `sim_evaluation_pipeline` project can compare Athena against `sim_agent` and plain Codex using recorded bags, contacts, and PX4 logs. Its pinned plugin snapshot and tool assumptions need updating for this release.
-
-For the existing two-tool Athena benchmark, use a clean checkout of the compatible `0.3.1` plugin revision (`8856b073`) and set `SIM_EVAL_ATHENA_PROJECT` to that checkout if needed. The benchmark also needs the `sim_agent` Python environment, Codex CLI and Code Mode host, and Docker access. From `sim_evaluation_pipeline`:
+The separate `sim_evaluation_pipeline` project can compare Athena against `sim_agent` and plain Codex using recorded bags, contacts, and PX4 logs. It snapshots a clean Athena revision for each batch. In that benchmark, Codex and the Athena simulation MCP server run directly inside the simulator container. The AAA server, AAA skill, and `dev_exec` tool are disabled; the bundled `sim_bringup` source is copied into each Athena case workspace. Set `SIM_EVAL_ATHENA_PROJECT` if this checkout is not beside the pipeline. The benchmark also needs the `sim_agent` Python environment, Codex CLI and Code Mode host, and Docker access on the host. From `sim_evaluation_pipeline`:
 
 ```bash
 ../sim_agent/.venv/bin/python run_batch.py --case 11

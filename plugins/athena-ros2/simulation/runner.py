@@ -260,8 +260,8 @@ def _sim_bringup_source(workspace: Path) -> Path:
     )
     if len(candidates) != 1:
         raise ValueError(
-            "Expected one sim_bringup under /home/ws/src/athena_NN. "
-            "Run the repository helper to prepare the Athena bringup checkout."
+            f"Expected one sim_bringup under {workspace / 'src'}/athena_NN. "
+            "Prepare the Athena bringup source in this workspace."
         )
     return candidates[0]
 
