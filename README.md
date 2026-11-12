@@ -14,7 +14,7 @@ codex plugin add athena-ros2@athena-mcp
 Restart Codex after installation. The `ros2-development` and `ros2-gazebo-testing` skills can be selected explicitly and are also discoverable during relevant work. The `athena-ros2` MCP server exposes exactly two tools:
 
 - `build_world` adds pillars, tables, chairs, and cardboard boxes to a copy of an empty basement or tripleA room SDF. The output must be a distinct path inside the ROS workspace, where it can remain with the regression test.
-- `run_simulation_test` starts a supplied X500-compatible drone and room world, then a ROS application launch file and a Codex-authored test command. Build the ROS workspace with `colcon` before calling it. Optional `px4_parameters` are applied at startup and logged with observed values. The tool starts an MCAP recorder before the application and test, records a small default PX4 evidence set and drone contacts, and returns readiness, exit codes, timeouts, and artifact paths under `<workspace>/agent/athena/simulation/`. Use `record_topics` to add feature-specific topics; battery is not recorded by default.
+- `run_simulation_test` starts a supplied X500-compatible drone and world named `environment`, then a ROS application launch file and a Codex-authored test command. Build the ROS workspace with `colcon` before calling it. Optional `px4_parameters` are applied at startup and logged with observed values. The tool starts an MCAP recorder before the application and test, records a small default PX4 evidence set and drone contact intervals, and returns readiness, exit codes, timeouts, and artifact paths under `<workspace>/agent/athena/simulation/`. A one-second quiet gap starts a new interval for a collision pair, separating takeoff from landing. Use `record_topics` to add feature-specific topics; battery is not recorded by default.
 
 The runner reports observations rather than diagnosing the root cause of a failed scenario. Codex uses its authored assertions, logs, and telemetry to decide whether the ROS implementation, scenario, or test needs repair.
 
@@ -23,6 +23,8 @@ The bundled `sim_bringup.test_support` Python module provides PX4 topic discover
 The input SDFs stay unchanged. When both the room and drone load Gazebo's Sensors system, the runner records a drone copy with the duplicate declaration removed. PX4's XRCE time synchronization is disabled for SITL startup; tests should use `/clock` and check PX4 timestamp semantics explicitly.
 
 The self-hosted configurator can create a missing X500 drone SDF at `drone.html` and an empty room SDF at `environment.html`. The plugin bundles the resource models referenced by those SDFs; see [model attribution](plugins/athena-ros2/THIRD_PARTY_MODELS.md).
+
+The separate `sim_evaluation_pipeline` project can run `codex-athena` alongside `sim_agent` and plain `codex`. It installs a pinned snapshot of this plugin inside an isolated Codex container and scores Athena's recorded bags, contacts, and PX4 logs with the same telemetry checks used for the other runners. The benchmark prompt leaves Codex free to choose when its two tools help.
 
 To update an existing installation, run `codex plugin marketplace upgrade athena-mcp` followed by `codex plugin add athena-ros2@athena-mcp`, then restart Codex.
 
