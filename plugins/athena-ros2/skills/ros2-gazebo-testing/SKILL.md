@@ -15,6 +15,23 @@ Use this skill alongside `ros2-development` when a ROS 2 feature needs a simulat
 
 Keep successful test code, application launch changes, and generated world SDF in the ROS workspace. Report the assertion evidence and any remaining uncertainty. Simulator startup by itself does not establish feature correctness.
 
-For PX4 command and control timestamps, observe a fresh PX4 telemetry timestamp with the bundled Px4Time helper and pass its now_us method to ControlStream and send_vehicle_command. ROS or Gazebo clock values are not interchangeable with PX4 boot time in this SITL setup. When starting a new package, the [stationary Offboard heartbeat example](assets/offboard-heartbeat/README.md) shows the launch-file layout and timestamped stream without adding mission logic to the scaffold.
+When using low-level `ControlStream` or `send_vehicle_command` directly, observe a fresh PX4 telemetry timestamp with the bundled Px4Time helper and pass its now_us method. `FlightSession` handles this internally. ROS or Gazebo clock values are not interchangeable with PX4 boot time in this SITL setup. When starting a new package, the [stationary Offboard heartbeat example](assets/offboard-heartbeat/README.md) shows the launch-file layout and timestamped stream without adding mission logic to the scaffold.
+
+For a scenario that owns the vehicle controls, use `sim_bringup.flight.FlightSession` with a test-owned ROS node. Its blocking calls spin that node; do not spin it concurrently in another executor. `Pose(north_m, east_m, up_m, yaw_rad=None)` is relative to the launch position captured by `wait_ready`; yaw is an absolute PX4 local heading in radians. `goto` reaches and settles at one pose, while `follow_path` tracks two or more points continuously. Generate circles or other paths in the scenario script and pass the resulting poses to `follow_path`. The helper also provides `arm`, `set_mode`, `takeoff`, `turn_to`, `hover`, and `land`; call `land` explicitly and close the session in a `finally` block or context manager. It does not make feature assertions.
+
+```python
+from sim_bringup.flight import FlightSession, Pose
+
+with FlightSession(node) as flight:
+    flight.wait_ready()
+    flight.takeoff(1.5)
+    flight.goto(Pose(1.0, 0.0, 1.5))
+    flight.follow_path([Pose(1.0, 0.0, 1.5), Pose(1.0, 1.0, 1.5)])
+    flight.set_mode("position")
+    hold = flight.hover(2.0)  # Assert the measured drift in this scenario.
+    flight.land()
+```
+
+Offboard follows streamed position references. Position mode uses bounded manual velocity input; Altitude mode needs horizontal feedback; Stabilized mode needs active horizontal and height control even for a hover. The helpers check fresh PX4 state and stop non-neutral manual input if the mode changes unexpectedly. A path speed is a target, not an arrival-time guarantee. If the application under test commands PX4, observe its behavior instead of issuing competing helper controls.
 
 After a flight, inspect the recorded bag as well as the test's own assertions. The bundled flight_report command measures continuous holds from PX4 positions and lists actual collision pairs, modes, and final landing state; see [flight report usage](references/flight-report.md). For repeated targets, use step event windows so an earlier hover cannot satisfy a later one. Choose tolerances from the requested behavior, allow a modest hold margin in the controller, and verify the observed duration. A floor contact is evidence of touchdown only after checking which drone collision touched the floor, position, and disarming state.

@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>sim_bringup</name>
-  <version>0.4.0</version>
+  <version>0.5.0</version>
   <description>Deterministic Gazebo, PX4, and ROS 2 test bringup.</description>
   <maintainer email="sim@example.com">Athena ROS 2</maintainer>
   <license>Apache-2.0</license>

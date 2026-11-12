@@ -173,6 +173,8 @@ class ControlStream:
             for publisher, message in items:
                 if hasattr(message, "timestamp"):
                     message.timestamp = timestamp_us
+                if hasattr(message, "timestamp_sample"):
+                    message.timestamp_sample = timestamp_us
                 publisher.publish(message)
             self.cycles_sent += 1
 
