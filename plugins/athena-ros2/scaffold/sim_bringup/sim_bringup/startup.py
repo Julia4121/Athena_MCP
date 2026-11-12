@@ -260,7 +260,17 @@ class Supervisor:
                 **{f"PX4_PARAM_{name}": str(value) for name, value in self.px4_parameters.items()},
             }
         )
-        px4 = self._start("px4", [str(Path(px4_root) / "build/px4_sitl_default/bin/px4")], px4_env, px4=True)
+        px4_build = Path(px4_root) / "build/px4_sitl_default"
+        px4_working = self.log_dir.parent / "px4_rootfs"
+        px4_working.mkdir()
+        # PX4 creates runtime links and logs in its working directory. The
+        # pinned image source tree is root-owned, so each run needs its own.
+        px4 = self._start(
+            "px4",
+            [str(px4_build / "bin/px4"), "-w", str(px4_working), str(px4_build / "etc")],
+            px4_env,
+            px4=True,
+        )
         if px4.stdin is not None:
             commands = [f"param set {name} {value}" for name, value in self.px4_parameters.items()]
             commands.extend(f"param show {name}" for name in self.px4_parameters)

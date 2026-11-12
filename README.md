@@ -1,39 +1,46 @@
 # Athena ROS 2 for Codex
 
-This repository packages ROS 2 development and Gazebo testing skills with a local MCP server as a Codex plugin. The [development skill](plugins/athena-ros2/skills/ros2-development/SKILL.md) contains the [Henki ROS 2 Best Practices](https://github.com/henki-robotics/henki_ros2_best_practices) directly, with attribution and the upstream license. The [simulation skill](plugins/athena-ros2/skills/ros2-gazebo-testing/SKILL.md) guides Codex through writing and testing a feature in Gazebo.
+This repository packages ROS 2 development guidance, PX4/Gazebo simulation tools, and a host-side path to supervised AAA/Vicon testing as a Codex plugin. The [flight workflow](plugins/athena-ros2/docs/flight-workflow.md) is the operator and Codex runbook.
 
 ## Install
 
-You need access to this private GitHub repository, [Codex](https://developers.openai.com/codex), Python 3.11 or newer, and [`uv`](https://docs.astral.sh/uv/) on your `PATH`. `build_world` and `run_simulation_test` run in the same container as Codex. Simulation requires ROS 2 Jazzy, Gazebo Harmonic, PX4 1.16 SITL, the Micro XRCE-DDS agent, `ros_gz_bridge`, and `colcon`; build `px4_msgs` in the ROS workspace before running a PX4 test. The existing `sim_agent` Docker image provides the simulator stack, but its LangGraph workflow is not used.
+Codex runs on the laptop. Install [Codex](https://developers.openai.com/codex), Python 3.11+, `uv`, Docker, the `drone_platform` checkout, and the Atlas checkout. Build the shared ROS development image using `drone_platform/containers/development/build_image.sh`. Set `ATHENA_PLATFORM_ROOT` and `ATHENA_ATLAS_ROOT` when the checkouts are outside their default paths; set `ATHENA_WORKSPACE` if the ROS workspace is elsewhere.
 
 ```bash
 codex plugin marketplace add ssh://git@github.com/Julia4121/Athena_MCP.git
 codex plugin add athena-ros2@athena-mcp
 ```
 
-Restart Codex after installation. The `ros2-development` and `ros2-gazebo-testing` skills can be selected explicitly and are also discoverable during relevant work. The `athena-ros2` MCP server exposes exactly two tools:
+Restart Codex after installation. The plugin has two MCP entries:
 
-- `build_world` adds pillars, tables, chairs, and cardboard boxes to a copy of an empty basement or tripleA room SDF. The output must be a distinct path inside the ROS workspace, where it can remain with the regression test.
-- `run_simulation_test` starts a supplied X500-compatible drone and world named `environment`, then a ROS application launch file and a Codex-authored test command. Build the ROS workspace with `colcon` before calling it. Optional `px4_parameters` are applied at startup and logged with observed values. The tool starts an MCAP recorder before the application and test, records a small default PX4 evidence set and drone contact intervals, and returns readiness, exit codes, timeouts, and artifact paths under `<workspace>/agent/athena/simulation/`. A one-second quiet gap starts a new interval for a collision pair, separating takeoff from landing. Use `record_topics` to add feature-specific topics; battery is not recorded by default.
+- `athena-ros2` starts inside `drone-development`. `dev_exec` runs arbitrary ROS build and debugging commands in that container. `build_world` and `run_simulation_test` run Gazebo, PX4 SITL, and ROS there and store evidence under `/home/ws/agent/athena/simulation/`.
+- `athena-aaa` runs on the laptop host. `deploy_onboard`, `check_onboard`, `prepare_aaa`, and `run_aaa_test` start inspectable jobs; `aaa_status` reads their progress and artifacts. The physical flight path uses the maintained `drone_platform` launcher and Atlas runner/dashboard.
 
-The runner reports observations rather than diagnosing the root cause of a failed scenario. Codex uses its authored assertions, logs, and telemetry to decide whether the ROS implementation, scenario, or test needs repair.
+The [ROS development skill](plugins/athena-ros2/skills/ros2-development/SKILL.md), [simulation skill](plugins/athena-ros2/skills/ros2-gazebo-testing/SKILL.md), and [AAA skill](plugins/athena-ros2/skills/ros2-aaa-testing/SKILL.md) guide the full sequence. The repository helper keeps `sim_bringup` and `atlas_bringup` in `athena_NN`, while new feature packages follow the workspace's Git layout. The current workspace uses a separate, properly named repository for a new feature package.
 
-The bundled `sim_bringup.test_support` Python module provides PX4 topic discovery, message waits, command acknowledgements, and a pausable control-message stream for Codex-authored tests. It contains no route or assertion logic. A command acknowledgement confirms receipt, so tests should also check the resulting vehicle state and motion.
+## Simulation behavior
 
-The input SDFs stay unchanged. When both the room and drone load Gazebo's Sensors system, the runner records a drone copy with the duplicate declaration removed. PX4's XRCE time synchronization is disabled for SITL startup; tests should use `/clock` and check PX4 timestamp semantics explicitly.
+`build_world` adds pillars, tables, chairs, and boxes to a copy of a supported empty room SDF in the ROS workspace. `run_simulation_test` starts an X500-compatible drone, PX4 SITL, Gazebo, a ROS application launch, and a Codex-authored test command. It rebuilds the application package before the run and records its source commit before and after when `source_repository_path` is supplied. It records MCAP, startup readiness, process exits, contact intervals, and logs under `/home/ws/agent/athena/simulation/`. Optional PX4 parameters and feature topics are included in the evidence. The runner reports observed facts; the test command supplies the feature assertions.
 
-The self-hosted configurator can create a missing X500 drone SDF at `drone.html` and an empty room SDF at `environment.html`. The plugin bundles the resource models referenced by those SDFs; see [model attribution](plugins/athena-ros2/THIRD_PARTY_MODELS.md).
+The copied `sim_bringup.test_support` module provides PX4 topic discovery, message waits, command acknowledgements, and a pausable control-message stream. An acknowledgement confirms receipt, so tests should check the resulting vehicle state and motion. The input SDFs stay unchanged; the runner writes a normalized drone copy if both SDFs load Gazebo's Sensors system. Tests should use `/clock` and check PX4 timestamp semantics. The plugin bundles resource models for SDFs produced by the self-hosted configurator; see [model attribution](plugins/athena-ros2/THIRD_PARTY_MODELS.md).
 
-The separate `sim_evaluation_pipeline` project can run `codex-athena` alongside `sim_agent` and plain `codex`. It installs a pinned snapshot of this plugin inside an isolated Codex container and scores Athena's recorded bags, contacts, and PX4 logs with the same telemetry checks used for the other runners. The benchmark prompt leaves Codex free to choose when its two tools help.
+The separate `sim_evaluation_pipeline` project can compare Athena against `sim_agent` and plain Codex using recorded bags, contacts, and PX4 logs. Its pinned plugin snapshot and tool assumptions need updating for this release.
 
-To update an existing installation, run `codex plugin marketplace upgrade athena-mcp` followed by `codex plugin add athena-ros2@athena-mcp`, then restart Codex.
-
-## Local development
-
-From this repository, install the dependencies and check the lock file with:
+For the existing two-tool Athena benchmark, use a clean checkout of the compatible `0.3.1` plugin revision (`8856b073`) and set `SIM_EVAL_ATHENA_PROJECT` to that checkout if needed. The benchmark also needs the `sim_agent` Python environment, Codex CLI and Code Mode host, and Docker access. From `sim_evaluation_pipeline`:
 
 ```bash
-uv sync --project plugins/athena-ros2 --locked
+../sim_agent/.venv/bin/python run_batch.py --case 11
+../sim_agent/.venv/bin/python run_batch.py --case 11 --runner codex-athena
 ```
 
-The plugin is defined under `plugins/athena-ros2`; `.agents/plugins/marketplace.json` makes it installable from this repository. The simulation server code lives in `simulation/`, and its fixed ROS bringup package lives in `scaffold/sim_bringup/`.
+The first command runs `sim_agent`, `codex`, and `codex-athena` in that order. Results and pinned source and image records are saved under `~/Projects/storage/sim_eval_artifacts/run_XX/`. The shared scorer checks recorded flight telemetry, world geometry, the drone model, and gear-to-floor contact using collision names and times; it does not use runner-specific contact labels.
+
+## Local checks
+
+```bash
+cd plugins/athena-ros2
+uv sync --locked
+uv run --locked python -m unittest tests.test_repositories tests.test_aaa_workflow -v
+```
+
+The plugin source is under `plugins/athena-ros2`. The simulation SDFs stay unchanged; the runner records readiness, process exits, logs, contact intervals, and MCAP data. The [model attribution](plugins/athena-ros2/THIRD_PARTY_MODELS.md) covers bundled Gazebo assets.

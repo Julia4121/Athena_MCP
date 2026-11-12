@@ -52,6 +52,21 @@ class ApplicationLaunch(BaseModel):
     arguments: dict[str, str] = Field(default_factory=dict)
 
 
+def ros_runtime_environment() -> dict[str, str]:
+    """Keep the MCP's Python venv out of ROS subprocesses."""
+
+    environment = os.environ.copy()
+    virtual_env = environment.pop("VIRTUAL_ENV", None)
+    environment.pop("UV_PROJECT_ENVIRONMENT", None)
+    if virtual_env:
+        venv_bin = str(Path(virtual_env) / "bin")
+        environment["PATH"] = os.pathsep.join(
+            part for part in environment.get("PATH", "").split(os.pathsep)
+            if part != venv_bin
+        )
+    return environment
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -237,6 +252,53 @@ def _result_path(run_dir: Path) -> Path:
     return run_dir / "result.json"
 
 
+def _sim_bringup_source(workspace: Path) -> Path:
+    candidates = sorted(
+        path for path in (workspace / "src").glob("athena_*/sim_bringup")
+        if re.fullmatch(r"athena_\d+", path.parent.name)
+        and (path / "package.xml").is_file()
+    )
+    if len(candidates) != 1:
+        raise ValueError(
+            "Expected one sim_bringup under /home/ws/src/athena_NN. "
+            "Run the repository helper to prepare the Athena bringup checkout."
+        )
+    return candidates[0]
+
+
+def _source_revision(workspace: Path, source_repository_path: str | None) -> dict[str, object] | None:
+    if source_repository_path is None:
+        return None
+    source = Path(source_repository_path).expanduser().resolve()
+    if not source.is_dir() or not (source == workspace or source.is_relative_to(workspace / "src")):
+        raise ValueError("source_repository_path must be the workspace or a checkout under workspace/src")
+    root = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, check=False,
+    )
+    if root.returncode or Path(root.stdout.strip()).resolve() != source:
+        raise ValueError("source_repository_path must name the root of its Git checkout")
+    sha = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    status = subprocess.run(
+        ["git", "-C", str(source), "status", "--porcelain=v1", "--untracked-files=all"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return {"repository_path": str(source), "sha": sha, "dirty": bool(status)}
+
+
+def _require_application_in_source(source_repository_path: str, package: str) -> None:
+    source = Path(source_repository_path).expanduser().resolve()
+    for manifest in source.rglob("package.xml"):
+        if any(part in {"build", "install", "log", ".git"} for part in manifest.relative_to(source).parts):
+            continue
+        if ET.parse(manifest).getroot().findtext("name") == package:
+            return
+    raise ValueError(f"The application package {package} is not in {source}")
+
+
 def run_test(
     workspace_path: str,
     drone_sdf: str,
@@ -247,6 +309,7 @@ def run_test(
     timeout_seconds: int = config.TEST_TIMEOUT_SECONDS,
     record_topics: list[str] | None = None,
     px4_parameters: dict[str, int | float] | None = None,
+    source_repository_path: str | None = None,
 ) -> dict[str, object]:
     """Return observed execution facts and artifacts, without a causal verdict."""
 
@@ -284,6 +347,9 @@ def run_test(
             raise ValueError("record_topics must contain absolute ROS topic names.")
         parameters = _validate_px4_parameters(px4_parameters)
         _preflight(workspace, drone, world, timeout_seconds)
+        result["source_revision"] = _source_revision(workspace, source_repository_path)
+        if source_repository_path is not None:
+            _require_application_in_source(source_repository_path, application_launch.package)
         # PX4, XRCE, and the Gazebo service names are shared across workspaces.
         lock = Path("/tmp/athena-ros2-simulation.lock").open("w")
         try:
@@ -309,7 +375,23 @@ def run_test(
             "record_topics": record_topics or [],
             "px4_parameters": parameters,
         }
-        base_env = _source_env([Path("/opt/ros/jazzy/setup.bash"), workspace / "install/setup.bash"], os.environ.copy())
+        base_env = _source_env([Path("/opt/ros/jazzy/setup.bash"), workspace / "install/setup.bash"], ros_runtime_environment())
+        result["last_phase"] = "application_build"
+        application_build = subprocess.run(
+            [
+                "colcon", "--log-base", str(run_dir / "application_colcon_logs"),
+                "build", "--base-paths", str(workspace / "src"),
+                "--packages-up-to", application_launch.package,
+            ],
+            cwd=workspace, env=base_env, capture_output=True, text=True,
+            timeout=600, check=False,
+        )
+        application_build_log = run_dir / "application_build.log"
+        application_build_log.write_text(application_build.stdout + application_build.stderr, encoding="utf-8")
+        result["artifacts"]["application_build_log"] = str(application_build_log)
+        if application_build.returncode:
+            raise RuntimeError(f"Application colcon build exited {application_build.returncode}; see application_build.log.")
+        base_env = _source_env([Path("/opt/ros/jazzy/setup.bash"), workspace / "install/setup.bash"], ros_runtime_environment())
         px4_msgs = subprocess.run(
             ["ros2", "pkg", "prefix", "px4_msgs"], env=base_env,
             capture_output=True, text=True, timeout=10, check=False,
@@ -319,7 +401,7 @@ def run_test(
         result["last_phase"] = "scaffold_build"
         build_command = [
             "colcon", "--log-base", str(run_dir / "scaffold_colcon_logs"),
-            "build", "--base-paths", str(config.SCAFFOLD_ROOT),
+            "build", "--base-paths", str(_sim_bringup_source(workspace)),
             "--build-base", str(run_dir / "scaffold_build"),
             "--install-base", str(run_dir / "scaffold_install"),
             "--packages-select", "sim_bringup",
@@ -465,6 +547,13 @@ def run_test(
             result["readiness"] = final_status.get("readiness", result["readiness"])
             result["readiness_details"] = final_status.get("readiness_details", result.get("readiness_details", {}))
             result["bringup_status"] = final_status
+        if source_repository_path is not None:
+            try:
+                result["source_revision_end"] = _source_revision(workspace, source_repository_path)
+                if result["source_revision_end"] != result.get("source_revision"):
+                    result["diagnostics"].append("The source checkout changed during simulation.")
+            except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+                result["diagnostics"].append(f"Could not verify source checkout after simulation: {exc}")
         _result_path(run_dir).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         if lock is not None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
