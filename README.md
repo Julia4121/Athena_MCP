@@ -20,6 +20,14 @@ The [ROS development skill](plugins/athena-ros2/skills/ros2-development/SKILL.md
 
 ## Simulation behavior
 
+The runner checks that the application launch file is installed in its ROS
+package before starting Gazebo and PX4. Pass the launch filename, such as
+heartbeat.launch.py, without a launch/ prefix. The bundled sim_bringup package
+also provides a read-only flight_report command for measuring hovers from the
+recorded MCAP and listing collision pairs. Its Px4Time helper stamps control
+messages from fresh PX4 telemetry. The simulation skill includes a small
+stationary Offboard heartbeat package as a launch and control reference.
+
 `build_world` adds pillars, tables, chairs, and boxes to a copy of a supported empty room SDF in the ROS workspace. `run_simulation_test` starts an X500-compatible drone, PX4 SITL, Gazebo, a ROS application launch, and a Codex-authored test command. It rebuilds the application package before the run and records its source commit before and after when `source_repository_path` is supplied. It records MCAP, startup readiness, process exits, contact intervals, and logs under `/home/ws/agent/athena/simulation/`. Optional PX4 parameters and feature topics are included in the evidence. The runner reports observed facts; the test command supplies the feature assertions.
 
 The copied `sim_bringup.test_support` module provides PX4 topic discovery, message waits, command acknowledgements, and a pausable control-message stream. An acknowledgement confirms receipt, so tests should check the resulting vehicle state and motion. The input SDFs stay unchanged; the runner writes a normalized drone copy if both SDFs load Gazebo's Sensors system. Tests should use `/clock` and check PX4 timestamp semantics. The plugin bundles resource models for SDFs produced by the self-hosted configurator; see [model attribution](plugins/athena-ros2/THIRD_PARTY_MODELS.md).

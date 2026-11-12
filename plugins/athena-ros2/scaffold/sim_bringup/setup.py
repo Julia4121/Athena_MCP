@@ -6,7 +6,7 @@ package_name = "sim_bringup"
 
 setup(
     name=package_name,
-    version="0.3.0",
+    version="0.4.0",
     packages=[package_name],
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/sim_bringup"]),
@@ -18,5 +18,6 @@ setup(
     entry_points={"console_scripts": [
         "startup = sim_bringup.startup:main",
         "contact_monitor = sim_bringup.contact_monitor:main",
+        "flight_report = sim_bringup.flight_report:main",
     ]},
 )

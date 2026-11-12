@@ -52,6 +52,27 @@ class ApplicationLaunch(BaseModel):
     arguments: dict[str, str] = Field(default_factory=dict)
 
 
+def _validate_application_launch(
+    application: ApplicationLaunch, workspace: Path, environment: dict[str, str]
+) -> None:
+    """Catch package installation mistakes before Gazebo and PX4 start."""
+
+    if Path(application.file).name != application.file:
+        raise ValueError("application_launch.file must be an installed launch filename, such as 'demo.launch.py'.")
+    prefix = subprocess.run(
+        ["ros2", "pkg", "prefix", application.package],
+        env=environment, capture_output=True, text=True, timeout=10, check=False,
+    )
+    if prefix.returncode:
+        raise ValueError(f"Application package {application.package!r} is not installed in the ROS workspace.")
+    installed_prefix = Path(prefix.stdout.strip()).resolve()
+    if not installed_prefix.is_relative_to((workspace / "install").resolve()):
+        raise ValueError(f"Application package {application.package!r} is not installed in this workspace.")
+    launch_file = installed_prefix / "share" / application.package / "launch" / application.file
+    if not launch_file.is_file():
+        raise ValueError(f"Application launch file is not installed: {launch_file}")
+
+
 def ros_runtime_environment() -> dict[str, str]:
     """Keep the MCP's Python venv out of ROS subprocesses."""
 
@@ -398,6 +419,8 @@ def run_test(
         )
         if px4_msgs.returncode:
             raise RuntimeError("px4_msgs is unavailable in the ROS workspace; build it with colcon before running a PX4 test.")
+        result["last_phase"] = "application_preflight"
+        _validate_application_launch(application_launch, workspace, base_env)
         result["last_phase"] = "scaffold_build"
         build_command = [
             "colcon", "--log-base", str(run_dir / "scaffold_colcon_logs"),
