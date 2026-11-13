@@ -482,7 +482,14 @@ def build_report(
     failsafe_flag_samples = observations.get("failsafe_flag_samples", [])
     battery_samples = observations.get("battery_samples", {})
     manual_samples = observations.get("manual_control_samples", {})
-    bag_start_ns = min(sample.wall_time_ns for sample in positions)
+    recorded_starts = [
+        item["first_wall_time_ns"]
+        for item in observations.get("topic_sample_gaps", {}).values()
+        if isinstance(item.get("first_wall_time_ns"), int)
+    ]
+    bag_start_ns = min(recorded_starts) if recorded_starts else min(
+        sample.wall_time_ns for sample in positions
+    )
     return {
         "run_id": run_result.get("run_id", run_dir.name),
         "last_phase": run_result.get("last_phase"),
