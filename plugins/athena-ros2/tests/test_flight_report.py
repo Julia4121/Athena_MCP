@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scaffold" / "sim_bringup"))
 
-from sim_bringup.flight_report import PositionSample, build_report, longest_stable_hold  # noqa: E402
+from sim_bringup.flight_report import (  # noqa: E402
+    PositionSample,
+    _topic_gap_summaries,
+    build_report,
+    longest_stable_hold,
+)
 
 
 def _sample(seconds: float, x: float, speed: float = 0.0) -> PositionSample:
@@ -41,6 +47,102 @@ def test_repeated_position_uses_distinct_step_windows(tmp_path: Path) -> None:
         {"event": "step_completed", "step": "second", "wall_time_ns": 2_400_000_000},
     ]
     report = build_report(tmp_path, samples, [], [], checkpoints, events)
-    assert report["checkpoints"][0]["meets_minimum"] is True
-    assert report["checkpoints"][1]["meets_minimum"] is False
+    assert report["checkpoints"][0]["longest_stable_seconds"] == 1.0
     assert report["checkpoints"][1]["longest_stable_seconds"] == 0.4
+    assert "meets_minimum" not in report["checkpoints"][0]
+
+
+def test_report_summarizes_transitions_gaps_battery_manual_and_contacts(tmp_path: Path) -> None:
+    samples = [_sample(t, x=0) for t in (0, 1, 2, 2.2, 3)]
+    statuses = [
+        {"wall_time_ns": 0, "nav_state": 1, "nav_state_name": "altctl",
+         "arming_state": 1, "arming_state_name": "disarmed", "failsafe": False},
+        {"wall_time_ns": 1_000_000_000, "nav_state": 2, "nav_state_name": "posctl",
+         "arming_state": 2, "arming_state_name": "armed", "failsafe": False},
+        {"wall_time_ns": 2_000_000_000, "nav_state": 2, "nav_state_name": "posctl",
+         "arming_state": 2, "arming_state_name": "armed", "failsafe": True},
+        {"wall_time_ns": 3_000_000_000, "nav_state": 10, "nav_state_name": "auto_land",
+         "arming_state": 1, "arming_state_name": "disarmed", "failsafe": False},
+    ]
+    land_states = [{"wall_time_ns": 3_000_000_000, "landed": True}]
+    contacts = [{
+        "topic": "/drone/contact", "collision_a": "gear", "collision_b": "floor",
+        "count": 3, "first_wall_time_ns": 1_600_000_000,
+        "last_wall_time_ns": 1_800_000_000,
+    }]
+    (tmp_path / "contacts.jsonl").write_text(
+        "".join(json.dumps(contact) + "\n" for contact in contacts), encoding="utf-8"
+    )
+    observations = {
+        "topic_sample_gaps": {
+            "/fmu/out/vehicle_status": {
+                "sample_count": 3, "maximum_gap_seconds": 1.0,
+                "largest_gaps": [{"duration_seconds": 1.0}],
+            }
+        },
+        "failsafe_flag_samples": [
+            {"wall_time_ns": 0, "topic": "/fmu/out/failsafe_flags",
+             "flags": {"offboard_signal_lost": False}},
+            {"wall_time_ns": 2_000_000_000, "topic": "/fmu/out/failsafe_flags",
+             "flags": {"offboard_signal_lost": True}},
+        ],
+        "battery_samples": {
+            "/fmu/out/battery_status": [
+                {"wall_time_ns": 1_000_000_000, "values": {"voltage_v": 16.2}},
+                {"wall_time_ns": 3_000_000_000, "values": {"voltage_v": 15.9}},
+            ]
+        },
+        "manual_control_samples": {
+            "/fmu/out/manual_control_setpoint": [
+                {"wall_time_ns": 1_900_000_000, "values": {"throttle": 0.3}},
+                {"wall_time_ns": 2_000_000_000, "values": {"throttle": 0.0}},
+                {"wall_time_ns": 2_200_000_000, "values": {"throttle": 0.0}},
+            ]
+        },
+    }
+
+    report = build_report(tmp_path, samples, statuses, land_states, [], [], observations)
+
+    assert report["state_transitions"] == statuses
+    assert [item["changed_flags"] for item in report["failsafe_flag_transitions"]] == [
+        {"offboard_signal_lost": False}, {"offboard_signal_lost": True}
+    ]
+    assert report["topic_sample_gaps"]["/fmu/out/vehicle_status"]["maximum_gap_seconds"] == 1.0
+    assert report["battery"]["/fmu/out/battery_status"]["sample_count"] == 2
+    manual = report["manual_control_after_failsafe"]
+    assert manual["failsafe_activation_wall_time_ns"] == 2_000_000_000
+    assert manual["topics"]["/fmu/out/manual_control_setpoint"]["samples"] == [
+        {"wall_time_ns": 2_000_000_000, "values": {"throttle": 0.0}},
+        {"wall_time_ns": 2_200_000_000, "values": {"throttle": 0.0}},
+    ]
+    context = report["contacts"][0]["time_context"]
+    assert context["start_seconds_from_bag_start"] == 1.6
+    assert context["status_at_start"]["failsafe"] is False
+    assert context["position_at_end"]["agl_m"] == 2.0
+
+
+def test_report_handles_optional_battery_and_manual_data(tmp_path: Path) -> None:
+    report = build_report(tmp_path, [_sample(0, 0)], [], [], [], [])
+    assert report["battery"] == {}
+    assert report["manual_control_after_failsafe"] == {
+        "failsafe_activation_wall_time_ns": None,
+        "topics": {},
+    }
+
+
+def test_topic_gap_summary_reports_largest_receive_time_gaps() -> None:
+    summary = _topic_gap_summaries({
+        "/fmu/out/vehicle_status": [0, 100_000_000, 500_000_000, 600_000_000]
+    })
+    assert summary["/fmu/out/vehicle_status"] == {
+        "sample_count": 4,
+        "first_wall_time_ns": 0,
+        "last_wall_time_ns": 600_000_000,
+        "gap_count": 3,
+        "maximum_gap_seconds": 0.4,
+        "largest_gaps": [
+            {"start_wall_time_ns": 100_000_000, "end_wall_time_ns": 500_000_000, "duration_seconds": 0.4},
+            {"start_wall_time_ns": 0, "end_wall_time_ns": 100_000_000, "duration_seconds": 0.1},
+            {"start_wall_time_ns": 500_000_000, "end_wall_time_ns": 600_000_000, "duration_seconds": 0.1},
+        ],
+    }

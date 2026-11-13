@@ -82,8 +82,55 @@ def _topic(topics: dict[str, str], base: str) -> str | None:
     return max(versions, key=lambda name: int(name.rsplit("_v", 1)[1])) if versions else None
 
 
-def read_bag(run_dir: Path) -> tuple[list[PositionSample], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Read only the PX4 topics needed for a compact flight report."""
+def _topics_for_base(topics: dict[str, str], base: str) -> list[str]:
+    return sorted(
+        name for name in topics
+        if name == base or re.fullmatch(re.escape(base) + r"_v\d+", name)
+    )
+
+
+def _enum_names(message_type: type, prefix: str) -> dict[int, str]:
+    return {
+        int(value): name.removeprefix(prefix).lower()
+        for name in dir(message_type)
+        if name.startswith(prefix)
+        and name != f"{prefix}MAX"
+        and isinstance((value := getattr(message_type, name)), int)
+    }
+
+
+def _simple_fields(message: Any, *, booleans_only: bool = False) -> dict[str, Any]:
+    """Return scalar and scalar-array fields, omitting PX4's separate boot time."""
+
+    fields = message.get_fields_and_field_types()
+    values: dict[str, Any] = {}
+    for name in fields:
+        if name == "timestamp":
+            continue
+        value = getattr(message, name)
+        if isinstance(value, bool):
+            if booleans_only:
+                values[name] = value
+        elif isinstance(value, (int, float, str)) and not booleans_only:
+            values[name] = (
+                float(value) if isinstance(value, float) and math.isfinite(value) else
+                None if isinstance(value, float) else value
+            )
+        elif not booleans_only and isinstance(value, (list, tuple)) and all(
+            isinstance(item, (bool, int, float, str)) for item in value
+        ):
+            values[name] = [
+                float(item) if isinstance(item, float) and math.isfinite(item) else
+                None if isinstance(item, float) else item
+                for item in value
+            ]
+    return values
+
+
+def read_bag(
+    run_dir: Path,
+) -> tuple[list[PositionSample], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Read flight states and observations from all topics present in the bag."""
 
     from rclpy.serialization import deserialize_message
     from rosidl_runtime_py.utilities import get_message
@@ -108,27 +155,77 @@ def read_bag(run_dir: Path) -> tuple[list[PositionSample], list[dict[str, Any]],
     }
     if names["position"] is None:
         raise ValueError("The bag has no PX4 local position topic.")
-    selected = {name: get_message(topics[name]) for name in names.values() if name is not None}
+    topic_groups = {
+        "failsafe_flags": _topics_for_base(topics, "/fmu/out/failsafe_flags"),
+        "battery": _topics_for_base(topics, "/fmu/out/battery_status"),
+        "manual_control": sorted({
+            name
+            for base in (
+                "/fmu/in/manual_control_input",
+                "/fmu/out/manual_control_setpoint",
+            )
+            for name in _topics_for_base(topics, base)
+        }),
+    }
+    selected_names = {
+        name
+        for name in names.values()
+        if name is not None
+    } | {
+        name for group in topic_groups.values() for name in group
+    }
+    selected = {name: get_message(topics[name]) for name in selected_names}
+    status_type = selected[names["status"]] if names["status"] else None
+    nav_names = _enum_names(status_type, "NAVIGATION_STATE_") if status_type else {}
+    arming_names = _enum_names(status_type, "ARMING_STATE_") if status_type else {}
     raw_positions: list[tuple[int, Any]] = []
     statuses: list[dict[str, Any]] = []
     land_states: list[dict[str, Any]] = []
+    topic_times: dict[str, list[int]] = {name: [] for name in topics}
+    failsafe_flag_samples: list[dict[str, Any]] = []
+    battery_samples: dict[str, list[dict[str, Any]]] = {
+        name: [] for name in topic_groups["battery"]
+    }
+    manual_samples: dict[str, list[dict[str, Any]]] = {
+        name: [] for name in topic_groups["manual_control"]
+    }
     while reader.has_next():
         topic, raw, wall_time_ns = reader.read_next()
+        wall_time_ns = int(wall_time_ns)
+        topic_times.setdefault(topic, []).append(wall_time_ns)
         message_type = selected.get(topic)
         if message_type is None:
             continue
         message = deserialize_message(raw, message_type)
         if topic == names["position"] and message.xy_valid and message.z_valid:
-            raw_positions.append((int(wall_time_ns), message))
+            raw_positions.append((wall_time_ns, message))
         elif topic == names["status"]:
             statuses.append({
-                "wall_time_ns": int(wall_time_ns),
+                "wall_time_ns": wall_time_ns,
                 "nav_state": int(message.nav_state),
+                "nav_state_name": nav_names.get(int(message.nav_state)),
                 "arming_state": int(message.arming_state),
+                "arming_state_name": arming_names.get(int(message.arming_state)),
                 "failsafe": bool(message.failsafe),
             })
         elif topic == names["land"]:
-            land_states.append({"wall_time_ns": int(wall_time_ns), "landed": bool(message.landed)})
+            land_states.append({"wall_time_ns": wall_time_ns, "landed": bool(message.landed)})
+        elif topic in topic_groups["failsafe_flags"]:
+            failsafe_flag_samples.append({
+                "wall_time_ns": wall_time_ns,
+                "topic": topic,
+                "flags": _simple_fields(message, booleans_only=True),
+            })
+        elif topic in battery_samples:
+            battery_samples[topic].append({
+                "wall_time_ns": wall_time_ns,
+                "values": _simple_fields(message),
+            })
+        elif topic in manual_samples:
+            manual_samples[topic].append({
+                "wall_time_ns": wall_time_ns,
+                "values": _simple_fields(message),
+            })
     if not raw_positions:
         raise ValueError("The bag has no valid PX4 local position samples.")
     first = raw_positions[0][1]
@@ -153,13 +250,169 @@ def read_bag(run_dir: Path) -> tuple[list[PositionSample], list[dict[str, Any]],
             agl_m=z0 - float(message.z),
             speed_m_s=math.sqrt(vx * vx + vy * vy + vz * vz),
         ))
-    return positions, statuses, land_states
+    observations = {
+        "topic_sample_gaps": _topic_gap_summaries(topic_times),
+        "failsafe_flag_samples": failsafe_flag_samples,
+        "battery_samples": battery_samples,
+        "manual_control_samples": manual_samples,
+    }
+    return positions, statuses, land_states, observations
+
+
+def _topic_gap_summaries(topic_times: dict[str, list[int]]) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for topic, raw_times in sorted(topic_times.items()):
+        times = sorted(raw_times)
+        if not times:
+            continue
+        gaps = [
+            {"start_wall_time_ns": first, "end_wall_time_ns": second,
+             "duration_seconds": round((second - first) / 1_000_000_000, 6)}
+            for first, second in zip(times, times[1:])
+        ]
+        largest = sorted(gaps, key=lambda item: item["duration_seconds"], reverse=True)[:5]
+        summaries[topic] = {
+            "sample_count": len(times),
+            "first_wall_time_ns": times[0],
+            "last_wall_time_ns": times[-1],
+            "gap_count": len(gaps),
+            "maximum_gap_seconds": largest[0]["duration_seconds"] if largest else None,
+            "largest_gaps": largest,
+        }
+    return summaries
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _state_transitions(statuses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fields = ("nav_state", "arming_state", "failsafe")
+    transitions: list[dict[str, Any]] = []
+    previous: tuple[Any, ...] | None = None
+    for status in statuses:
+        state = tuple(status.get(field) for field in fields)
+        if state != previous:
+            transitions.append({key: status.get(key) for key in (
+                "wall_time_ns", *fields, "nav_state_name", "arming_state_name"
+            )})
+            previous = state
+    return transitions
+
+
+def _flag_transitions(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    transitions: list[dict[str, Any]] = []
+    previous: dict[str, bool] | None = None
+    for sample in samples:
+        flags = sample.get("flags", {})
+        if not isinstance(flags, dict):
+            continue
+        changed = (
+            dict(flags) if previous is None else {
+                name: value for name, value in flags.items()
+                if previous.get(name) != value
+            }
+        )
+        if changed:
+            transitions.append({
+                "wall_time_ns": sample["wall_time_ns"],
+                "topic": sample.get("topic"),
+                "changed_flags": changed,
+                "flags": dict(flags),
+            })
+        previous = dict(flags)
+    return transitions
+
+
+def _latest_at_or_before(
+    samples: list[dict[str, Any]], wall_time_ns: int
+) -> dict[str, Any] | None:
+    latest = None
+    for sample in samples:
+        if sample["wall_time_ns"] > wall_time_ns:
+            break
+        latest = sample
+    return latest
+
+
+def _contact_context(
+    contacts: list[dict[str, Any]],
+    bag_start_ns: int,
+    statuses: list[dict[str, Any]],
+    positions: list[PositionSample],
+) -> list[dict[str, Any]]:
+    contextual: list[dict[str, Any]] = []
+    position_records = [
+        {
+            "wall_time_ns": sample.wall_time_ns,
+            "forward_m": sample.forward_m,
+            "right_m": sample.right_m,
+            "agl_m": sample.agl_m,
+            "speed_m_s": sample.speed_m_s,
+        }
+        for sample in positions
+    ]
+    for contact in contacts:
+        start = int(contact["first_wall_time_ns"])
+        end = int(contact["last_wall_time_ns"])
+        start_state = _latest_at_or_before(statuses, start)
+        end_state = _latest_at_or_before(statuses, end)
+        start_position = _latest_at_or_before(position_records, start)
+        end_position = _latest_at_or_before(position_records, end)
+        contextual.append({
+            **contact,
+            "time_context": {
+                "start_seconds_from_bag_start": round((start - bag_start_ns) / 1e9, 3),
+                "end_seconds_from_bag_start": round((end - bag_start_ns) / 1e9, 3),
+                "status_at_start": start_state,
+                "status_at_end": end_state,
+                "position_at_start": start_position,
+                "position_at_end": end_position,
+            },
+        })
+    return contextual
+
+
+def _battery_report(samples: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    return {
+        topic: {
+            "sample_count": len(items),
+            "first_wall_time_ns": items[0]["wall_time_ns"] if items else None,
+            "last_wall_time_ns": items[-1]["wall_time_ns"] if items else None,
+            "readings": items,
+        }
+        for topic, items in samples.items()
+        if items
+    }
+
+
+def _manual_after_failsafe(
+    statuses: list[dict[str, Any]],
+    samples: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    activation_times = [
+        item["wall_time_ns"] for item in statuses if item.get("failsafe")
+    ]
+    activated_ns = min(activation_times) if activation_times else None
+    after = {
+        topic: {
+            "sample_count": sum(
+                activated_ns is not None and item["wall_time_ns"] >= activated_ns
+                for item in items
+            ),
+            "samples": [
+                item for item in items
+                if activated_ns is not None and item["wall_time_ns"] >= activated_ns
+            ],
+        }
+        for topic, items in samples.items()
+    }
+    return {
+        "failsafe_activation_wall_time_ns": activated_ns,
+        "topics": after,
+    }
 
 
 def build_report(
@@ -169,6 +422,7 @@ def build_report(
     land_states: list[dict[str, Any]],
     checkpoints: list[dict[str, Any]],
     events: list[dict[str, Any]],
+    observations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not positions:
         raise ValueError("At least one position sample is required.")
@@ -216,7 +470,6 @@ def build_report(
             "name": name,
             "target_forward_right_agl_m": target,
             "minimum_seconds": minimum_seconds,
-            "meets_minimum": hold["longest_stable_seconds"] >= minimum_seconds,
             "window_start_wall_time_ns": start_ns,
             "window_end_wall_time_ns": end_ns,
             **hold,
@@ -224,6 +477,12 @@ def build_report(
     result_path = run_dir / "result.json"
     run_result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.is_file() else {}
     contacts_path = run_dir / "contacts.jsonl"
+    contacts = _read_jsonl(contacts_path)
+    observations = observations or {}
+    failsafe_flag_samples = observations.get("failsafe_flag_samples", [])
+    battery_samples = observations.get("battery_samples", {})
+    manual_samples = observations.get("manual_control_samples", {})
+    bag_start_ns = min(sample.wall_time_ns for sample in positions)
     return {
         "run_id": run_result.get("run_id", run_dir.name),
         "last_phase": run_result.get("last_phase"),
@@ -232,12 +491,18 @@ def build_report(
         "land_state_samples": len(land_states),
         "nav_states_observed": sorted({item["nav_state"] for item in statuses}),
         "failsafe_observed": any(item["failsafe"] for item in statuses),
+        "state_transitions": _state_transitions(statuses),
+        "failsafe_flag_samples": len(failsafe_flag_samples),
+        "failsafe_flag_transitions": _flag_transitions(failsafe_flag_samples),
         "final_nav_state": statuses[-1]["nav_state"] if statuses else None,
         "final_arming_state": statuses[-1]["arming_state"] if statuses else None,
         "final_landed": land_states[-1]["landed"] if land_states else None,
+        "topic_sample_gaps": observations.get("topic_sample_gaps", {}),
+        "battery": _battery_report(battery_samples),
+        "manual_control_after_failsafe": _manual_after_failsafe(statuses, manual_samples),
         "checkpoints": measured,
         "contacts_file_present": contacts_path.is_file(),
-        "contacts": _read_jsonl(contacts_path),
+        "contacts": _contact_context(contacts, bag_start_ns, statuses, positions),
     }
 
 
@@ -249,10 +514,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path, help="Write the JSON report here; otherwise print it")
     args = parser.parse_args()
     plan = json.loads(args.checkpoints.read_text(encoding="utf-8")) if args.checkpoints else {}
-    positions, statuses, land_states = read_bag(args.run_dir)
+    positions, statuses, land_states, observations = read_bag(args.run_dir)
     report = build_report(
         args.run_dir, positions, statuses, land_states,
-        plan.get("checkpoints", []), _read_jsonl(args.events) if args.events else [],
+        plan.get("checkpoints", []),
+        _read_jsonl(args.events) if args.events else [],
+        observations,
     )
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:

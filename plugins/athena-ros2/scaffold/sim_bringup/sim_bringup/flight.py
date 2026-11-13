@@ -128,6 +128,9 @@ class FlightSession:
         "altitude": 2.0,
         "stabilized": 7.0,
     }
+    _manual_input_limit: ClassVar[float] = 0.5
+    _manual_takeoff_ramp_seconds: ClassVar[float] = 1.0
+    _manual_takeoff_liftoff_m: ClassVar[float] = 0.15
 
     def __init__(self, node: Any) -> None:
         import rclpy
@@ -416,7 +419,8 @@ class FlightSession:
         message.valid = True
         message.data_source = self._types["manual"].SOURCE_MAVLINK_0
         message.roll, message.pitch, message.yaw, message.throttle = (
-            _clamp(float(value), 0.5) for value in (roll, pitch, yaw, throttle)
+            _clamp(float(value), self._manual_input_limit)
+            for value in (roll, pitch, yaw, throttle)
         )
         message.sticks_moving = any(
             abs(value) > 1e-4
@@ -779,19 +783,72 @@ class FlightSession:
             deadline=deadline,
         )
 
+    def _manual_takeoff_until_liftoff(self, deadline: float) -> float:
+        """Ramp bounded climb input until fresh position data confirms ascent."""
+
+        try:
+            self._require_active()
+            start_z = float(self._position.z)
+            last_position_ns = self._position_received_ns
+            started = time.monotonic()
+            while time.monotonic() < deadline:
+                sample = self._next_position(last_position_ns, deadline)
+                last_position_ns = self._position_received_ns
+                climbed_m = start_z - float(sample.z)
+                if climbed_m >= self._manual_takeoff_liftoff_m:
+                    return climbed_m
+                ramp = min(
+                    1.0,
+                    max(0.0, (time.monotonic() - started) / self._manual_takeoff_ramp_seconds),
+                )
+                self._set_manual(throttle=ramp * self._manual_input_limit)
+            raise TimeoutError(
+                f"PX4 position did not confirm liftoff before deadline; {self._state()}"
+            )
+        except Exception:
+            # Keep the manual stream alive and neutral while the test inspects the failure.
+            self._neutral_manual()
+            raise
+
     def takeoff(
-        self, up_m: float, *, speed_mps: float = 0.7, timeout_seconds: float = 35
+        self,
+        up_m: float,
+        *,
+        speed_mps: float = 0.7,
+        timeout_seconds: float = 35,
+        mode: str | None = None,
     ) -> dict[str, Any]:
-        """Arm if necessary, then climb to an altitude relative to wait_ready."""
+        """Arm if necessary, then climb relative to wait_ready in the selected mode."""
 
         if not math.isfinite(up_m) or up_m <= 0:
             raise ValueError("takeoff up_m must be positive and finite.")
+        if mode is not None and mode not in self._mode_states:
+            raise ValueError(f"Unsupported PX4 mode {mode!r}.")
         deadline = self._deadline(timeout_seconds)
-        if (
-            self._status is None
-            or self._status.arming_state != self._types["status"].ARMING_STATE_ARMED
-        ):
-            self.arm(timeout_seconds=self._remaining(deadline))
+        if mode is None:
+            if (
+                self._status is None
+                or self._status.arming_state != self._types["status"].ARMING_STATE_ARMED
+            ):
+                self.arm(timeout_seconds=self._remaining(deadline))
+        else:
+            self.set_mode(mode, timeout_seconds=self._remaining(deadline))
+            status_type = self._types["status"]
+            if self._status.arming_state != status_type.ARMING_STATE_ARMED:
+                if not self._status.pre_flight_checks_pass:
+                    raise RuntimeError(f"PX4 pre-arm checks are not passing; {self._state()}")
+                self._command(
+                    self._types["command"].VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                    (1.0,),
+                    deadline,
+                )
+                self._wait_state(
+                    lambda status: status.arming_state == status_type.ARMING_STATE_ARMED,
+                    deadline,
+                    "arming",
+                )
+            if mode in {"position", "altitude", "stabilized"}:
+                self._manual_takeoff_until_liftoff(deadline)
         return self.goto(
             Pose(0.0, 0.0, up_m),
             speed_mps=speed_mps,

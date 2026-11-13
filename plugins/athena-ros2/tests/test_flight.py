@@ -116,6 +116,163 @@ def test_failed_mode_confirmation_keeps_previous_mode() -> None:
     session._stop_offboard.assert_not_called()
 
 
+def test_takeoff_without_mode_keeps_legacy_arming_and_navigation() -> None:
+    class Status:
+        ARMING_STATE_ARMED = 2
+
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    session._status = SimpleNamespace(arming_state=Status.ARMING_STATE_ARMED)
+    session._types = {"status": Status}
+    session.arm = Mock()
+    session.goto = Mock(return_value={"mode": "position"})
+
+    result = session.takeoff(1.5)
+
+    assert result == {"mode": "position"}
+    session.arm.assert_not_called()
+    session.goto.assert_called_once()
+    assert session.goto.call_args.args == (flight.Pose(0.0, 0.0, 1.5),)
+    assert "mode" not in session.goto.call_args.kwargs
+
+
+def test_takeoff_without_mode_arms_with_legacy_offboard_helper() -> None:
+    class Status:
+        ARMING_STATE_ARMED = 2
+
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    session._status = SimpleNamespace(arming_state=1)
+    session._types = {"status": Status}
+    session.arm = Mock()
+    session.goto = Mock(return_value={})
+
+    session.takeoff(1.0)
+
+    session.arm.assert_called_once()
+
+
+def test_takeoff_explicit_mode_is_selected_before_arming_and_liftoff() -> None:
+    class Status:
+        ARMING_STATE_ARMED = 2
+        ARMING_STATE_DISARMED = 1
+
+    calls: list[str] = []
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    session._status = SimpleNamespace(
+        arming_state=Status.ARMING_STATE_DISARMED,
+        pre_flight_checks_pass=True,
+    )
+    session._types = {
+        "status": Status,
+        "command": SimpleNamespace(VEHICLE_CMD_COMPONENT_ARM_DISARM=400),
+    }
+
+    def set_mode(mode: str, *, timeout_seconds: float) -> None:
+        calls.append(f"mode:{mode}")
+
+    def wait_state(predicate, _deadline, _label) -> None:
+        calls.append("armed")
+        session._status.arming_state = Status.ARMING_STATE_ARMED
+        assert predicate(session._status)
+
+    session.set_mode = Mock(side_effect=set_mode)
+    session._command = Mock(side_effect=lambda *_args: calls.append("arm_command"))
+    session._wait_state = Mock(side_effect=wait_state)
+    session._manual_takeoff_until_liftoff = Mock(side_effect=lambda _deadline: calls.append("liftoff"))
+    session.goto = Mock(side_effect=lambda *_args, **_kwargs: calls.append("goto") or {})
+
+    session.takeoff(1.2, mode="position")
+
+    assert calls == ["mode:position", "arm_command", "armed", "liftoff", "goto"]
+    session.set_mode.assert_called_once()
+    assert session.set_mode.call_args.args == ("position",)
+
+
+def test_manual_takeoff_ramps_bounded_input_until_liftoff_is_measured() -> None:
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    session._position = SimpleNamespace(z=0.0)
+    session._position_received_ns = 10
+    session._require_active = Mock()
+    session._set_manual = Mock()
+    session._neutral_manual = Mock()
+    altitude_updates = iter((0.0, -0.03, -0.1, -0.16))
+
+    def next_position(_previous_ns: int, _deadline: float) -> SimpleNamespace:
+        session._position_received_ns += 1
+        session._position.z = next(altitude_updates)
+        return session._position
+
+    session._next_position = next_position
+
+    climbed_m = session._manual_takeoff_until_liftoff(flight.time.monotonic() + 2)
+
+    assert climbed_m == pytest.approx(0.16)
+    throttle = [call.kwargs["throttle"] for call in session._set_manual.call_args_list]
+    assert throttle == sorted(throttle)
+    assert all(0 <= value <= session._manual_input_limit for value in throttle)
+    session._neutral_manual.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("PX4 position wait timed out; mode=position"),
+        RuntimeError("PX4 local position stopped updating; mode=position"),
+        RuntimeError("PX4 left the commanded armed mode; armed=1, failsafe=False"),
+        RuntimeError("PX4 left the commanded armed mode; armed=2, failsafe=True"),
+    ],
+    ids=("timeout", "stale_position", "disarmed", "failsafe"),
+)
+def test_manual_takeoff_stops_and_neutralizes_on_px4_failure(error: Exception) -> None:
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    session._position = SimpleNamespace(z=0.0)
+    session._position_received_ns = 10
+    session._require_active = Mock()
+    session._next_position = Mock(side_effect=error)
+    session._neutral_manual = Mock()
+    session._set_manual = Mock()
+
+    with pytest.raises(type(error), match=str(error)):
+        session._manual_takeoff_until_liftoff(flight.time.monotonic() + 1)
+
+    session._neutral_manual.assert_called_once()
+    session._set_manual.assert_not_called()
+
+
+def test_px4_takeover_keeps_manual_stream_alive_and_neutral() -> None:
+    class Status:
+        ARMING_STATE_ARMED = 2
+        NAVIGATION_STATE_POSCTL = 2
+
+    class Stream:
+        def __init__(self) -> None:
+            self.updates = []
+            self.closed = False
+
+        def update(self, index, message) -> None:
+            self.updates.append((index, message))
+
+        def close(self) -> None:
+            self.closed = True
+
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    session._mode = "position"
+    session._types = {"status": Status}
+    session._clock = SimpleNamespace(observe=Mock())
+    session._manual_stream = Stream()
+    session._manual_message = Mock(return_value="neutral")
+    session._status = None
+
+    session._on_status(SimpleNamespace(
+        nav_state=9,
+        arming_state=Status.ARMING_STATE_ARMED,
+        failsafe=False,
+        failsafe_and_user_took_over=False,
+    ))
+
+    assert session._manual_stream.updates == [(0, "neutral")]
+    assert session._manual_stream.closed is False
+
+
 def test_path_requires_endpoint_to_remain_settled(monkeypatch) -> None:
     now = 0.0
     monkeypatch.setattr(flight, "time", SimpleNamespace(monotonic=lambda: now))

@@ -16,11 +16,13 @@ class EvidenceTests(unittest.TestCase):
             "/clock",
             "/fmu/out/vehicle_status_v1",
             "/fmu/out/vehicle_local_position",
+            "/fmu/out/failsafe_flags_v1",
             "/fmu/out/battery_status",
         }
         selected, missing = select_topics(available, [])
         self.assertIn("/fmu/out/vehicle_status_v1", selected)
         self.assertNotIn("/fmu/out/vehicle_status", selected)
+        self.assertIn("/fmu/out/failsafe_flags_v1", selected)
         self.assertNotIn("/fmu/out/battery_status", selected)
         self.assertIn("/fmu/in/vehicle_command", selected)
         self.assertIn("/fmu/in/telemetry_status", missing)
