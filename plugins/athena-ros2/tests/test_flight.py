@@ -88,6 +88,41 @@ def test_mode_takeover_neutralizes_input() -> None:
     session._neutral_manual.assert_called_once()
 
 
+@pytest.mark.parametrize(("status_age_seconds", "stale"), [(10.0, False), (16.0, True)])
+def test_active_check_uses_bounded_status_age_with_fresh_position(
+    status_age_seconds: float, stale: bool
+) -> None:
+    class Status:
+        ARMING_STATE_ARMED = 2
+        NAVIGATION_STATE_POSCTL = 2
+
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    session._origin = (0.0, 0.0, 0.0)
+    session._closed = False
+    session._mode = "position"
+    session._types = {"status": Status}
+    session._status = SimpleNamespace(
+        arming_state=Status.ARMING_STATE_ARMED,
+        nav_state=Status.NAVIGATION_STATE_POSCTL,
+        failsafe=False,
+        failsafe_and_user_took_over=False,
+    )
+    session._position = SimpleNamespace(x=0.0, y=0.0, z=0.0)
+    session._land = None
+    session._status_received_ns = flight.time.monotonic_ns() - int(status_age_seconds * 1e9)
+    session._position_received_ns = flight.time.monotonic_ns()
+    session._valid_position = Mock(return_value=True)
+    session._neutral_manual = Mock()
+
+    if stale:
+        with pytest.raises(RuntimeError, match="status or local position is stale"):
+            session._require_active()
+        session._neutral_manual.assert_called_once()
+    else:
+        session._require_active()
+        session._neutral_manual.assert_not_called()
+
+
 def test_failed_mode_confirmation_keeps_previous_mode() -> None:
     class Status:
         NAVIGATION_STATE_ALTCTL = 1
@@ -161,10 +196,12 @@ def test_takeoff_explicit_mode_is_selected_before_arming_and_liftoff() -> None:
         arming_state=Status.ARMING_STATE_DISARMED,
         pre_flight_checks_pass=True,
     )
+    session._status_received_ns = 1
     session._types = {
         "status": Status,
         "command": SimpleNamespace(VEHICLE_CMD_COMPONENT_ARM_DISARM=400),
     }
+    session._fresh = Mock(return_value=True)
 
     def set_mode(mode: str, *, timeout_seconds: float) -> None:
         calls.append(f"mode:{mode}")

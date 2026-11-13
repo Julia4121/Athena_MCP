@@ -131,6 +131,9 @@ class FlightSession:
     _manual_input_limit: ClassVar[float] = 0.5
     _manual_takeoff_ramp_seconds: ClassVar[float] = 1.0
     _manual_takeoff_liftoff_m: ClassVar[float] = 0.15
+    # PX4's state topic is slower than local position; bound loss without
+    # requiring a new state sample for every fresh position update.
+    _status_max_age_seconds: ClassVar[float] = 15.0
 
     def __init__(self, node: Any) -> None:
         import rclpy
@@ -332,7 +335,10 @@ class FlightSession:
     def _require_active(self, target: tuple[float, float, float] | None = None) -> None:
         self._require_ready()
         status = self._status
-        if not self._fresh(self._status_received_ns) or not self._valid_position():
+        if (
+            not self._fresh(self._status_received_ns, self._status_max_age_seconds)
+            or not self._valid_position()
+        ):
             self._neutral_manual()
             raise RuntimeError(
                 f"PX4 status or local position is stale or invalid; {self._state(target)}"
@@ -832,11 +838,21 @@ class FlightSession:
             ):
                 self.arm(timeout_seconds=self._remaining(deadline))
         else:
-            self.set_mode(mode, timeout_seconds=self._remaining(deadline))
             status_type = self._types["status"]
-            if self._status.arming_state != status_type.ARMING_STATE_ARMED:
-                if not self._status.pre_flight_checks_pass:
-                    raise RuntimeError(f"PX4 pre-arm checks are not passing; {self._state()}")
+            status_fresh = (
+                self._status is not None
+                and self._fresh(self._status_received_ns)
+            )
+            already_armed = (
+                status_fresh
+                and self._status.arming_state == status_type.ARMING_STATE_ARMED
+            )
+            if not already_armed and not (
+                status_fresh and self._status.pre_flight_checks_pass
+            ):
+                raise RuntimeError(f"PX4 pre-arm checks are not passing; {self._state()}")
+            self.set_mode(mode, timeout_seconds=self._remaining(deadline))
+            if not already_armed:
                 self._command(
                     self._types["command"].VEHICLE_CMD_COMPONENT_ARM_DISARM,
                     (1.0,),
