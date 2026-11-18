@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import sys
 import json
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scaffold" / "sim_bringup"))
 
-from sim_bringup.flight_report import (  # noqa: E402
+from sim_bringup.flight_report import (
     PositionSample,
     _topic_gap_summaries,
     build_report,

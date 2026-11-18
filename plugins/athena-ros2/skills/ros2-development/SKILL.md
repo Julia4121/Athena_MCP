@@ -7,9 +7,14 @@ description: Develop or review ROS 2 nodes, packages, interfaces, launch files, 
 
 Use the best practices below when developing or reviewing ROS 2 code. Respect explicit user requirements and the established conventions of the project, especially in legacy code.
 
-- Identify the project's ROS distribution, language, build type, and existing patterns before choosing APIs or package structure. Check documentation for that distribution when behavior is version specific.
 - When messages carry time or spatial data, check timestamps, clock source, coordinate frames, units, and QoS compatibility at each connection.
-- Run the relevant build and tests with the project's available commands. Use failures as diagnostics, fix issues within the task's scope, and report any remaining failures.
+
+## Development workflow
+
+1. Inspect the workspace, source packages, ROS distribution, language, build types, available tools, and existing conventions before choosing APIs or package structure. Source the appropriate ROS setup if needed, and check that distribution's documentation when behavior is version specific.
+2. Before the first build and after `package.xml` changes, check declared workspace dependencies. In a standard colcon workspace, run `rosdep update` if its cache is missing or stale, then `rosdep check --from-paths src --ignore-src --rosdistro <distro>`. Install missing dependencies with `rosdep install --from-paths src --ignore-src --rosdistro <distro> -y` when the environment permits package installation; refresh apt metadata only when apt installation needs it. Investigate unresolved rosdep keys before changing manifests, and skip keys only for dependencies known to be provided by the environment.
+3. Implement within the existing package layout. Keep `package.xml`, build files, and install rules in sync with the changes. Add focused tests for new or changed behavior where appropriate, and register them with the package build system.
+4. Run the project's applicable lint checks, build, and relevant package tests, typically with `colcon build` and `colcon test`. Inspect test failures with `colcon test-result --verbose`, fix issues within the task's scope, rerun affected checks, and report results and remaining failures.
 
 # Henki ROS 2 Best Practices
 

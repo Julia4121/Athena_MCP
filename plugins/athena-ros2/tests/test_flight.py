@@ -212,6 +212,9 @@ def test_takeoff_explicit_mode_is_selected_before_arming_and_liftoff() -> None:
         assert predicate(session._status)
 
     session.set_mode = Mock(side_effect=set_mode)
+    session._wait_preflight_checks = Mock(
+        side_effect=lambda _deadline: calls.append("preflight")
+    )
     session._command = Mock(side_effect=lambda *_args: calls.append("arm_command"))
     session._wait_state = Mock(side_effect=wait_state)
     session._manual_takeoff_until_liftoff = Mock(side_effect=lambda _deadline: calls.append("liftoff"))
@@ -219,9 +222,80 @@ def test_takeoff_explicit_mode_is_selected_before_arming_and_liftoff() -> None:
 
     session.takeoff(1.2, mode="position")
 
-    assert calls == ["mode:position", "arm_command", "armed", "liftoff", "goto"]
+    assert calls == [
+        "mode:position",
+        "preflight",
+        "arm_command",
+        "armed",
+        "liftoff",
+        "goto",
+    ]
     session.set_mode.assert_called_once()
     assert session.set_mode.call_args.args == ("position",)
+
+
+def test_manual_takeoff_waits_for_fresh_preflight_after_mode_selection() -> None:
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    session._status = SimpleNamespace(
+        pre_flight_checks_pass=False,
+        failsafe=False,
+        failsafe_and_user_took_over=False,
+    )
+    session._status_received_ns = 1
+    session._fresh = Mock(return_value=True)
+    session._neutral_manual = Mock()
+    session._state = Mock(return_value="mode=position")
+    session._spin = Mock(
+        side_effect=lambda _deadline: setattr(
+            session._status, "pre_flight_checks_pass", True
+        )
+    )
+
+    session._wait_preflight_checks(flight.time.monotonic() + 1)
+
+    session._spin.assert_called_once()
+    session._neutral_manual.assert_not_called()
+
+
+def test_manual_takeoff_preflight_wait_reports_stale_status() -> None:
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    session._status = SimpleNamespace(
+        pre_flight_checks_pass=False,
+        failsafe=False,
+        failsafe_and_user_took_over=False,
+    )
+    session._status_received_ns = 1
+    session._fresh = Mock(return_value=False)
+    session._neutral_manual = Mock()
+    session._state = Mock(return_value="mode=position")
+
+    with pytest.raises(RuntimeError, match="status stopped updating"):
+        session._wait_preflight_checks(flight.time.monotonic() + 1)
+
+    session._fresh.assert_called_once_with(
+        session._status_received_ns, session._status_max_age_seconds
+    )
+    session._neutral_manual.assert_called_once()
+
+
+def test_manual_takeoff_preflight_wait_stops_on_failsafe() -> None:
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    session._status = SimpleNamespace(
+        pre_flight_checks_pass=False,
+        failsafe=True,
+        failsafe_and_user_took_over=False,
+    )
+    session._status_received_ns = 1
+    session._fresh = Mock(return_value=True)
+    session._neutral_manual = Mock()
+    session._state = Mock(return_value="mode=position, failsafe=True")
+    session._spin = Mock()
+
+    with pytest.raises(RuntimeError, match="entered failsafe"):
+        session._wait_preflight_checks(flight.time.monotonic() + 1)
+
+    session._spin.assert_not_called()
+    session._neutral_manual.assert_called_once()
 
 
 def test_manual_takeoff_ramps_bounded_input_until_liftoff_is_measured() -> None:

@@ -7,6 +7,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -133,8 +134,8 @@ def read_bag(
     """Read flight states and observations from all topics present in the bag."""
 
     from rclpy.serialization import deserialize_message
-    from rosidl_runtime_py.utilities import get_message
     from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
+    from rosidl_runtime_py.utilities import get_message
 
     bag = run_dir / "bag"
     if not (bag / "metadata.yaml").is_file():
@@ -268,7 +269,7 @@ def _topic_gap_summaries(topic_times: dict[str, list[int]]) -> dict[str, dict[st
         gaps = [
             {"start_wall_time_ns": first, "end_wall_time_ns": second,
              "duration_seconds": round((second - first) / 1_000_000_000, 6)}
-            for first, second in zip(times, times[1:])
+            for first, second in pairwise(times)
         ]
         largest = sorted(gaps, key=lambda item: item["duration_seconds"], reverse=True)[:5]
         summaries[topic] = {

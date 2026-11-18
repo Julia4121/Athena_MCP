@@ -392,6 +392,30 @@ class FlightSession:
         self._neutral_manual()
         raise TimeoutError(f"PX4 did not confirm {label}; {self._state()}")
 
+    def _wait_preflight_checks(self, deadline: float) -> None:
+        """Keep the neutral manual input flowing until PX4 accepts pre-arm checks."""
+
+        while time.monotonic() < deadline:
+            if not self._fresh(
+                self._status_received_ns, self._status_max_age_seconds
+            ):
+                self._neutral_manual()
+                raise RuntimeError(
+                    f"PX4 status stopped updating while waiting for pre-arm checks; {self._state()}"
+                )
+            if self._status.failsafe or self._status.failsafe_and_user_took_over:
+                self._neutral_manual()
+                raise RuntimeError(
+                    f"PX4 entered failsafe while waiting for pre-arm checks; {self._state()}"
+                )
+            if self._status.pre_flight_checks_pass:
+                return
+            self._spin(deadline)
+        self._neutral_manual()
+        raise TimeoutError(
+            f"PX4 pre-arm checks did not pass after mode selection; {self._state()}"
+        )
+
     def _command(
         self, command: int, parameters: Sequence[float], deadline: float
     ) -> None:
@@ -853,6 +877,8 @@ class FlightSession:
                 raise RuntimeError(f"PX4 pre-arm checks are not passing; {self._state()}")
             self.set_mode(mode, timeout_seconds=self._remaining(deadline))
             if not already_armed:
+                if mode in {"position", "altitude", "stabilized"}:
+                    self._wait_preflight_checks(deadline)
                 self._command(
                     self._types["command"].VEHICLE_CMD_COMPONENT_ARM_DISARM,
                     (1.0,),
