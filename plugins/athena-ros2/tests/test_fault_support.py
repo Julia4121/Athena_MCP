@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import struct
 import sys
 import time
 from pathlib import Path
@@ -31,16 +32,30 @@ def support(monkeypatch):
 
 def test_battery_feed_starts_at_requested_level_and_updates(support, monkeypatch) -> None:
     sent = []
+    parameter_sets = []
     mav = SimpleNamespace(
         srcSystem=0, srcComponent=0,
         battery_status_send=lambda *args: sent.append(args),
+        param_set_send=lambda *args: parameter_sets.append(args),
     )
+    acknowledgements = [
+        SimpleNamespace(param_id=b"OTHER", param_type=6, param_value=0.0),
+        SimpleNamespace(param_id=b"COM_LOW_BAT_ACT\x00", param_type=6,
+                        param_value=struct.unpack("<f", struct.pack("<i", 3))[0]),
+    ]
+
+    def receive(*, type, **_kwargs):
+        if type == "HEARTBEAT":
+            return SimpleNamespace(get_srcSystem=lambda: 1, get_srcComponent=lambda: 1)
+        return acknowledgements.pop(0) if acknowledgements else None
+
     peer = SimpleNamespace(
         mav=mav,
-        recv_match=lambda **_kwargs: SimpleNamespace(get_srcSystem=lambda: 1),
+        recv_match=receive,
         close=lambda: None,
     )
-    constants = SimpleNamespace(MAV_BATTERY_FUNCTION_ALL=0, MAV_BATTERY_TYPE_LIPO=3)
+    constants = SimpleNamespace(MAV_BATTERY_FUNCTION_ALL=0, MAV_BATTERY_TYPE_LIPO=3,
+                                MAV_PARAM_TYPE_INT32=6)
     monkeypatch.setitem(sys.modules, "pymavlink", SimpleNamespace(
         mavutil=SimpleNamespace(mavlink=constants, mavlink_connection=lambda *_args: peer),
     ))
@@ -67,6 +82,16 @@ def test_battery_feed_starts_at_requested_level_and_updates(support, monkeypatch
         while not any(item[-1] == 25 for item in sent) and time.monotonic() < deadline:
             time.sleep(0.01)
         assert any(item[-1] == 25 for item in sent)
+        feed.set_low_battery_action(3)
+        target_system, target_component, name, encoded, parameter_type = parameter_sets[0]
+        assert (target_system, target_component, name, parameter_type) == (
+            1, 1, b"COM_LOW_BAT_ACT", 6,
+        )
+        assert struct.unpack("<i", struct.pack("<f", encoded))[0] == 3
+        with pytest.raises(TimeoutError, match="acknowledge"):
+            feed.set_low_battery_action(2, timeout_seconds=0.01)
+        with pytest.raises(ValueError, match="Low-battery action"):
+            feed.set_low_battery_action(3.0)
     with pytest.raises(ValueError, match="integer"):
         feed.set_percent(25.5)
 

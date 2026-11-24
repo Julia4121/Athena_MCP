@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import struct
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -214,6 +215,8 @@ class BatteryFeed:
         self._published = threading.Event()
         self._thread: threading.Thread | None = None
         self._peer: Any = None
+        self._target_system: int | None = None
+        self._target_component: int | None = None
         self._error: Exception | None = None
         self.first_observed: Any = None
 
@@ -229,13 +232,13 @@ class BatteryFeed:
         try:
             while not self._stop.is_set():
                 with self._lock:
-                    percent = self._percent
-                # Four real cell voltages followed by MAVLink's unknown marker.
-                self._peer.mav.battery_status_send(
-                    0, mavutil.mavlink.MAV_BATTERY_FUNCTION_ALL,
-                    mavutil.mavlink.MAV_BATTERY_TYPE_LIPO, 2500,
-                    [4000] * 4 + [65535] * 6, -1, -1, -1, percent,
-                )
+                    # Share the MAVLink encoder with runtime parameter updates.
+                    # Four real cell voltages precede the unknown marker.
+                    self._peer.mav.battery_status_send(
+                        0, mavutil.mavlink.MAV_BATTERY_FUNCTION_ALL,
+                        mavutil.mavlink.MAV_BATTERY_TYPE_LIPO, 2500,
+                        [4000] * 4 + [65535] * 6, -1, -1, -1, self._percent,
+                    )
                 self._published.set()
                 self._stop.wait(self._period)
         except Exception as exc:  # noqa: BLE001 - surface a background sender failure.
@@ -250,6 +253,8 @@ class BatteryFeed:
             heartbeat = self._peer.recv_match(type="HEARTBEAT", blocking=True, timeout=8.0)
             if heartbeat is None:
                 raise TimeoutError("PX4 MAVLink heartbeat was not received on UDP 14550.")
+            self._target_system = heartbeat.get_srcSystem()
+            self._target_component = heartbeat.get_srcComponent()
             self._peer.mav.srcSystem = heartbeat.get_srcSystem()
             self._peer.mav.srcComponent = 190
             self._thread = threading.Thread(target=self._publish, name="battery-status-feed", daemon=True)
@@ -265,6 +270,44 @@ class BatteryFeed:
     def set_percent(self, percent: int) -> None:
         with self._lock:
             self._percent = self._validate_percent(percent)
+
+    def set_low_battery_action(self, value: int, timeout_seconds: float = 5.0) -> None:
+        """Set PX4's shared battery action and confirm its MAVLink INT32 acknowledgement."""
+
+        from pymavlink import mavutil
+
+        if isinstance(value, bool) or not isinstance(value, int) or value not in (0, 2, 3):
+            raise ValueError("Low-battery action must be 0 (warn), 2 (Land), or 3 (Return/Land).")
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("Parameter acknowledgement timeout must be positive and finite.")
+        if self._peer is None or self._target_system is None or self._target_component is None:
+            raise RuntimeError("Battery feed is not active.")
+        if self._error is not None:
+            raise RuntimeError(f"Battery feed stopped: {self._error}")
+
+        encoded = struct.unpack("<f", struct.pack("<i", value))[0]
+        with self._lock:
+            self._peer.mav.param_set_send(
+                self._target_system, self._target_component, b"COM_LOW_BAT_ACT",
+                encoded, mavutil.mavlink.MAV_PARAM_TYPE_INT32,
+            )
+        deadline = time.monotonic() + timeout_seconds
+        while (remaining := deadline - time.monotonic()) > 0:
+            response = self._peer.recv_match(type="PARAM_VALUE", blocking=True, timeout=remaining)
+            if response is None:
+                break
+            name = response.param_id
+            if isinstance(name, bytes):
+                name = name.decode("ascii")
+            if str(name).rstrip("\x00") != "COM_LOW_BAT_ACT":
+                continue
+            if response.param_type != mavutil.mavlink.MAV_PARAM_TYPE_INT32:
+                raise RuntimeError("PX4 returned a non-INT32 battery action.")
+            observed = struct.unpack("<i", struct.pack("<f", response.param_value))[0]
+            if observed != value:
+                raise RuntimeError(f"PX4 reported COM_LOW_BAT_ACT={observed}, expected {value}.")
+            return
+        raise TimeoutError("PX4 did not acknowledge COM_LOW_BAT_ACT.")
 
     def wait_for_percent(self, percent: int, timeout_seconds: float = 5.0) -> Any:
         """Return fresh PX4 output that confirms the requested fraction."""
