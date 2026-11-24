@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
+import os
 import re
 import threading
 import time
 from collections.abc import Callable, Sequence
-from typing import Any
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Self
 
 import rclpy
 from rclpy.clock import Clock, ClockType
@@ -194,3 +198,125 @@ class ControlStream:
 
     def close(self) -> None:
         self.node.destroy_timer(self._timer)
+
+
+class BatteryFeed:
+    """Publish external MAVLink battery measurements throughout a scenario."""
+
+    def __init__(self, node: Node, initial_percent: int, *, rate_hz: float = 5.0) -> None:
+        if not math.isfinite(rate_hz) or rate_hz <= 0:
+            raise ValueError("Battery feed rate must be positive and finite.")
+        self.node = node
+        self._percent = self._validate_percent(initial_percent)
+        self._period = 1.0 / rate_hz
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._published = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._peer: Any = None
+        self._error: Exception | None = None
+        self.first_observed: Any = None
+
+    @staticmethod
+    def _validate_percent(value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+            raise ValueError("Battery percentage must be an integer from 0 to 100.")
+        return value
+
+    def _publish(self) -> None:
+        from pymavlink import mavutil
+
+        try:
+            while not self._stop.is_set():
+                with self._lock:
+                    percent = self._percent
+                # Four real cell voltages followed by MAVLink's unknown marker.
+                self._peer.mav.battery_status_send(
+                    0, mavutil.mavlink.MAV_BATTERY_FUNCTION_ALL,
+                    mavutil.mavlink.MAV_BATTERY_TYPE_LIPO, 2500,
+                    [4000] * 4 + [65535] * 6, -1, -1, -1, percent,
+                )
+                self._published.set()
+                self._stop.wait(self._period)
+        except Exception as exc:  # noqa: BLE001 - surface a background sender failure.
+            self._error = exc
+            self._published.set()
+
+    def __enter__(self) -> Self:
+        from pymavlink import mavutil
+
+        self._peer = mavutil.mavlink_connection("udpin:0.0.0.0:14550")
+        try:
+            heartbeat = self._peer.recv_match(type="HEARTBEAT", blocking=True, timeout=8.0)
+            if heartbeat is None:
+                raise TimeoutError("PX4 MAVLink heartbeat was not received on UDP 14550.")
+            self._peer.mav.srcSystem = heartbeat.get_srcSystem()
+            self._peer.mav.srcComponent = 190
+            self._thread = threading.Thread(target=self._publish, name="battery-status-feed", daemon=True)
+            self._thread.start()
+            if not self._published.wait(3.0) or self._error is not None:
+                raise RuntimeError(f"Battery feed did not start: {self._error}")
+            self.first_observed = self.wait_for_percent(self._percent)
+            return self
+        except Exception:
+            self.close()
+            raise
+
+    def set_percent(self, percent: int) -> None:
+        with self._lock:
+            self._percent = self._validate_percent(percent)
+
+    def wait_for_percent(self, percent: int, timeout_seconds: float = 5.0) -> Any:
+        """Return fresh PX4 output that confirms the requested fraction."""
+
+        from px4_msgs.msg import BatteryStatus
+
+        requested = self._validate_percent(percent)
+        topic = resolve_px4_topic(self.node, "/fmu/out/battery_status", timeout_seconds)
+        return wait_for_message(
+            self.node, BatteryStatus, topic,
+            lambda message: (bool(message.connected)
+                             and abs(float(message.remaining) - requested / 100.0) <= 0.015),
+            timeout_seconds,
+        )
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+            self._thread = None
+        if self._peer is not None:
+            self._peer.close()
+            self._peer = None
+
+    def __exit__(self, _type: type[BaseException] | None,
+                 _value: BaseException | None, _traceback: TracebackType | None) -> None:
+        self.close()
+
+
+def write_step_completed(
+    step: str, failsafe_flags: Any, flag_name: str, vehicle_status: Any,
+    *, path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Record a named observed PX4 fault and integer navigation state."""
+
+    if not step or not isinstance(step, str):
+        raise ValueError("Step name must be a nonempty string.")
+    observed = getattr(failsafe_flags, flag_name, None)
+    state = getattr(vehicle_status, "nav_state", None)
+    if not isinstance(observed, bool) or isinstance(state, bool) or not isinstance(state, int):
+        raise TypeError("Expected an observed boolean failsafe flag and integer PX4 nav_state.")
+    if path is None:
+        run_dir = os.environ.get("ATHENA_SIMULATION_RUN_DIR")
+        if not run_dir:
+            raise ValueError("Provide path or set ATHENA_SIMULATION_RUN_DIR.")
+        path = Path(run_dir) / "scenario_events.jsonl"
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    event = {"event": "step_completed", "step": step, "step_id": step,
+             "wall_time_ns": time.time_ns(),
+             "result": {"failsafe_flag": flag_name, "failsafe_active": observed,
+                        "nav_state": state}}
+    with destination.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(event, sort_keys=True) + "\n")
+    return event

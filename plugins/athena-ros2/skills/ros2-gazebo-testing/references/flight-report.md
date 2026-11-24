@@ -1,7 +1,9 @@
 # Measured flight report
 
-The sim_bringup package provides a read-only flight_report command. It reads
-an Athena run's MCAP bag, contact intervals, and result file. It reports
+The runner writes `flight_report.json` automatically after closing an Athena run's
+MCAP bag. The sim_bringup package also provides a read-only `flight_report` command
+for reports with custom checkpoints. The report reads the bag, contact intervals,
+and result file. It reports
 measured PX4 state and failsafe transitions, per-topic sample gaps, contact
 intervals with nearby position and vehicle state, and any recorded battery and
 post-failsafe manual-control samples. It reports observations and does not

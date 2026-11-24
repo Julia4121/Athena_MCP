@@ -14,7 +14,7 @@ import subprocess
 import time
 import uuid
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator
@@ -273,6 +273,40 @@ def _result_path(run_dir: Path) -> Path:
     return run_dir / "result.json"
 
 
+def _generate_flight_report(run_dir: Path, run_env: dict[str, str], result: dict[str, object]) -> None:
+    """Summarize a finalized bag without hiding a report failure from the caller."""
+
+    report_path = run_dir / "flight_report.json"
+    command = ["ros2", "run", "sim_bringup", "flight_report", str(run_dir),
+               "--output", str(report_path)]
+    events_path = run_dir / "scenario_events.jsonl"
+    if events_path.is_file():
+        command.extend(["--events", str(events_path)])
+    try:
+        completed = subprocess.run(command, env=run_env, cwd=run_dir,
+                                   capture_output=True, text=True, timeout=120, check=False)
+        if completed.returncode:
+            raise RuntimeError((completed.stderr or completed.stdout).strip()[-600:]
+                               or f"flight_report exited {completed.returncode}")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        summary = {key: report.get(key) for key in (
+            "position_samples", "status_samples", "failsafe_observed",
+            "final_nav_state", "final_arming_state", "final_landed",
+        )}
+        summary["contact_count"] = len(report.get("contacts", []))
+        summary["battery_first_remaining"] = {
+            topic: values["readings"][0]["values"].get("remaining")
+            for topic, values in report.get("battery", {}).items()
+            if values.get("readings")
+        }
+        result["artifacts"]["flight_report"] = str(report_path)
+        result["flight_report"] = {"path": str(report_path), "summary": summary}
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError,
+            subprocess.TimeoutExpired) as exc:
+        result["flight_report"] = {"path": str(report_path), "error": f"{type(exc).__name__}: {exc}"}
+        result["diagnostics"].append("Flight report generation failed: " + result["flight_report"]["error"])
+
+
 def _sim_bringup_source(workspace: Path) -> Path:
     candidates = sorted(
         path for path in (workspace / "src").glob("athena_*/sim_bringup")
@@ -341,7 +375,7 @@ def run_test(
         raise ValueError("workspace_path must be an existing directory in this container.")
     run_root = workspace / "agent" / "athena" / "simulation"
     run_root.mkdir(parents=True, exist_ok=True)
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     run_dir = run_root / run_id
     run_dir.mkdir()
     result: dict[str, object] = {
@@ -372,7 +406,7 @@ def run_test(
         if source_repository_path is not None:
             _require_application_in_source(source_repository_path, application_launch.package)
         # PX4, XRCE, and the Gazebo service names are shared across workspaces.
-        lock = Path("/tmp/athena-ros2-simulation.lock").open("w")
+        lock = Path("/tmp/athena-ros2-simulation.lock").open("w")  # noqa: SIM115 - released in finally.
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -442,6 +476,7 @@ def run_test(
         run_env["GZ_SIM_RESOURCE_PATH"] = os.pathsep.join(resource_roots + [run_env.get("GZ_SIM_RESOURCE_PATH", "")])
         run_env["SDF_PATH"] = os.pathsep.join(resource_roots + [run_env.get("SDF_PATH", "")])
         run_env["GZ_PARTITION"] = "athena_" + run_id.replace("-", "_")
+        run_env["ATHENA_SIMULATION_RUN_DIR"] = str(run_dir)
         if not Path("/dev/dri").exists():
             run_env.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
         result["last_phase"] = "bringup"
@@ -578,6 +613,9 @@ def run_test(
             except (OSError, ValueError, subprocess.CalledProcessError) as exc:
                 result["diagnostics"].append(f"Could not verify source checkout after simulation: {exc}")
         _result_path(run_dir).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if result["recording"]["metadata_written"] and "run_env" in locals():
+            _generate_flight_report(run_dir, run_env, result)
+            _result_path(run_dir).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         if lock is not None:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
             lock.close()

@@ -1,0 +1,7 @@
+# Fault-testing evidence
+
+For an externally stepped battery, pass `SIM_BAT_ENABLE=0` in `px4_parameters` so PX4 disables its native battery simulator before startup. Add `/fmu/out/battery_status` to `record_topics`. Start `sim_bringup.test_support.BatteryFeed(node, 35)` before arming, use `set_percent()` after each measured hold, and confirm each new reading with `wait_for_percent()`. After the run, check the **first recorded** `BatteryStatus.remaining` in `flight_report.json` as well as the subsequent values and warnings; a later 35% reading does not establish a 35% start.
+
+For a ROS GCS or control-stream interruption, use the existing `ControlStream.pause()` and `resume()` around a monotonic timed interval. Measure the last input before the interruption, the first input after recovery, the PX4 loss flag, and at least five seconds of response after the requested outage. Genuine MAVLink GCS loss requires a MAVLink heartbeat sender; inspect PX4's recorded link state and the ULog telemetry when available.
+
+Record the observed fault and navigation state with `write_step_completed(step, failsafe_flags, flag_name, vehicle_status)`. The helper writes `scenario_events.jsonl` in the run directory with a wall timestamp, the actual boolean flag, and integer `nav_state`. Pass fresh PX4 messages. Inspect the returned `flight_report` path, summary, and any generation error before claiming success. Report the measured fault timing and resulting PX4 state.
