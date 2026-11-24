@@ -88,6 +88,14 @@ def ros_runtime_environment() -> dict[str, str]:
     return environment
 
 
+def _ros_setup_files(workspace: Path) -> list[Path]:
+    files = [Path("/opt/ros/jazzy/setup.bash")]
+    if underlay := os.environ.get("SIM_EVAL_PX4_MSGS_SETUP"):
+        files.append(Path(underlay))
+    files.append(workspace / "install/setup.bash")
+    return files
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -430,7 +438,7 @@ def run_test(
             "record_topics": record_topics or [],
             "px4_parameters": parameters,
         }
-        base_env = _source_env([Path("/opt/ros/jazzy/setup.bash"), workspace / "install/setup.bash"], ros_runtime_environment())
+        base_env = _source_env(_ros_setup_files(workspace), ros_runtime_environment())
         result["last_phase"] = "application_build"
         application_build = subprocess.run(
             [
@@ -446,7 +454,7 @@ def run_test(
         result["artifacts"]["application_build_log"] = str(application_build_log)
         if application_build.returncode:
             raise RuntimeError(f"Application colcon build exited {application_build.returncode}; see application_build.log.")
-        base_env = _source_env([Path("/opt/ros/jazzy/setup.bash"), workspace / "install/setup.bash"], ros_runtime_environment())
+        base_env = _source_env(_ros_setup_files(workspace), ros_runtime_environment())
         px4_msgs = subprocess.run(
             ["ros2", "pkg", "prefix", "px4_msgs"], env=base_env,
             capture_output=True, text=True, timeout=10, check=False,
@@ -469,7 +477,7 @@ def run_test(
         if built.returncode:
             raise RuntimeError(f"sim_bringup colcon build exited {built.returncode}; see scaffold_build.log.")
         run_env = _source_env(
-            [Path("/opt/ros/jazzy/setup.bash"), workspace / "install/setup.bash", run_dir / "scaffold_install/setup.bash"],
+            [*_ros_setup_files(workspace), run_dir / "scaffold_install/setup.bash"],
             base_env,
         )
         resource_roots = [str(config.MODEL_ROOT), str(config.ENVIRONMENT_MODELS), str(drone.parent.parent), str(drone.parent), str(world.parent)]

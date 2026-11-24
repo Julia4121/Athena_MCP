@@ -9,6 +9,15 @@ from pathlib import Path
 from simulation import runner
 
 
+def test_runner_sources_available_px4_message_underlay(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SIM_EVAL_PX4_MSGS_SETUP", "/opt/sim-eval-px4-msgs/install/setup.bash")
+    assert runner._ros_setup_files(tmp_path) == [
+        Path("/opt/ros/jazzy/setup.bash"),
+        Path("/opt/sim-eval-px4-msgs/install/setup.bash"),
+        tmp_path / "install/setup.bash",
+    ]
+
+
 def test_auto_report_returns_compact_summary(monkeypatch, tmp_path: Path) -> None:
     (tmp_path / "scenario_events.jsonl").write_text("", encoding="utf-8")
 
