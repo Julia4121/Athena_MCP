@@ -5,9 +5,9 @@ description: Develop or review ROS 2 nodes, packages, interfaces, launch files, 
 
 # ROS 2 development
 
-Follow the task's required ROS interfaces and the existing workspace conventions. Preserve specified topic, service, action, message, parameter, node, and executable names; keep the current language and package layout unless the task requires a change.
+Follow the task's ROS interface and workspace conventions. Preserve specified topics, services, actions, messages, parameters, nodes, executables, language, and package layout unless the task requires otherwise.
 
-Inspect relevant packages and source the appropriate ROS environment when needed. At modified communication boundaries, check timestamps and clock source, coordinate frames, units, and QoS compatibility. Keep `package.xml`, build files, and install rules aligned with dependencies actually used.
+Inspect relevant source, metadata, and ROS setup in one focused pass; avoid repeating scans of unchanged files. At modified connections, check timestamps, clocks, frames, units, and QoS compatibility. Keep `package.xml`, build files, and install rules aligned with dependencies actually used.
 
 Make the smallest coherent change. Run a targeted build and focused checks for changed behavior; add tests or documentation where they clarify or verify that behavior. Use `rosdep` or package installation only when a required dependency is missing or unresolved, not as a routine pre-build step.
 
