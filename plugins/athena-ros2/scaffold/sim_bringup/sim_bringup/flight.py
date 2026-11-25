@@ -705,6 +705,17 @@ class FlightSession:
                 local_speed = min(
                     speed_mps, math.sqrt(2.0 * max(remaining - tolerance_m * 0.5, 0.0))
                 )
+                if target_progress >= total - 1e-6:
+                    # Route progress can finish while cross-track error remains.
+                    # Keep position control active until the endpoint settles.
+                    endpoint_distance = _distance(current, points[-1])
+                    local_speed = min(
+                        speed_mps,
+                        max(
+                            local_speed,
+                            math.sqrt(2.0 * max(endpoint_distance - tolerance_m * 0.5, 0.0)),
+                        ),
+                    )
                 self._control(target, yaw, local_speed)
                 endpoint_error = _distance(current, points[-1])
                 velocity = math.sqrt(

@@ -415,6 +415,42 @@ def test_path_requires_endpoint_to_remain_settled(monkeypatch) -> None:
     assert result["duration_seconds"] >= 1.5
 
 
+def test_position_path_corrects_endpoint_after_route_progress_finishes(monkeypatch) -> None:
+    now = 0.0
+    monkeypatch.setattr(flight, "time", SimpleNamespace(monotonic=lambda: now))
+    session = flight.FlightSession.__new__(flight.FlightSession)
+    current = [1.0, 0.4, 0.0]
+    sample = SimpleNamespace(vx=0.0, vy=0.0, vz=0.0, heading=0.0)
+    session._position_received_ns = 0
+    session._mode = "position"
+    session._require_active = Mock()
+    session._position_tuple = lambda: tuple(current)
+    session._snapshot = Mock(return_value={})
+    session._neutral_manual = Mock()
+
+    def next_position(_previous_ns, _deadline):
+        nonlocal now
+        now += 0.1
+        session._position_received_ns += 1
+        return sample
+
+    def control(target, _yaw, speed):
+        if target != (1.0, 0.0, 0.0) or speed <= 0:
+            return
+        current[1] -= min(current[1], speed * 0.1)
+
+    session._next_position = next_position
+    session._control = control
+    result = session._navigate(
+        [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+        [0.0, 0.0],
+        speed_mps=1.0,
+        tolerance_m=0.25,
+        deadline=5.0,
+    )
+    assert result["endpoint_error_m"] <= 0.25
+
+
 def test_path_rejects_duplicate_consecutive_points() -> None:
     with pytest.raises(ValueError, match="different positions"):
         flight._route_lengths([(0, 0, 0), (0, 0, 0)])
