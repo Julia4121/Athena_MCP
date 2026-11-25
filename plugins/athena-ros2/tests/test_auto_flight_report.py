@@ -26,7 +26,17 @@ def test_auto_report_returns_compact_summary(monkeypatch, tmp_path: Path) -> Non
         (tmp_path / "flight_report.json").write_text(json.dumps({
             "position_samples": 40, "status_samples": 5, "failsafe_observed": True,
             "final_nav_state": 18, "final_arming_state": 1, "final_landed": True,
-            "contacts": [{}], "battery": {
+            "contacts": [
+                {"collision_a": "drone::base_link::base_link_collision_3",
+                 "collision_b": "room::room_link::floor_collision",
+                 "time_context": {"position_at_start": {"speed_m_s": 0.72}}},
+                {"collision_a": "drone::base_link::base_link_collision_4",
+                 "collision_b": "room::room_link::floor_collision",
+                 "time_context": {"position_at_start": {"speed_m_s": 0.83}}},
+                {"collision_a": "drone::base_link::base_link_collision_0",
+                 "collision_b": "room::room_link::floor_collision",
+                 "time_context": {"position_at_start": {"speed_m_s": 2.5}}},
+            ], "battery": {
                 "/fmu/out/battery_status": {"readings": [{"values": {"remaining": 0.35}}]},
             },
         }), encoding="utf-8")
@@ -39,6 +49,7 @@ def test_auto_report_returns_compact_summary(monkeypatch, tmp_path: Path) -> Non
     assert result["flight_report"]["summary"]["battery_first_remaining"] == {
         "/fmu/out/battery_status": 0.35,
     }
+    assert result["flight_report"]["summary"]["max_gear_floor_contact_speed_m_s"] == 0.83
     assert result["diagnostics"] == []
 
 

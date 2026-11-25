@@ -302,6 +302,20 @@ def _generate_flight_report(run_dir: Path, run_env: dict[str, str], result: dict
             "final_nav_state", "final_arming_state", "final_landed",
         )}
         summary["contact_count"] = len(report.get("contacts", []))
+        gear_floor_speeds = []
+        for contact in report.get("contacts", []):
+            pair = (contact.get("collision_a", ""), contact.get("collision_b", ""))
+            if not (any("floor_collision" in name for name in pair)
+                    and any("base_link_collision_3" in name or "base_link_collision_4" in name
+                            for name in pair)):
+                continue
+            position = contact.get("time_context", {}).get("position_at_start", {})
+            speed = position.get("speed_m_s")
+            if isinstance(speed, (int, float)) and math.isfinite(speed):
+                gear_floor_speeds.append(float(speed))
+        summary["max_gear_floor_contact_speed_m_s"] = (
+            round(max(gear_floor_speeds), 3) if gear_floor_speeds else None
+        )
         summary["battery_first_remaining"] = {
             topic: values["readings"][0]["values"].get("remaining")
             for topic, values in report.get("battery", {}).items()

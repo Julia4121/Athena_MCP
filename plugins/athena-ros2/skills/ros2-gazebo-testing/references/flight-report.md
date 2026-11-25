@@ -8,6 +8,8 @@ measured PX4 state and failsafe transitions, per-topic sample gaps, contact
 intervals with nearby position and vehicle state, and any recorded battery and
 post-failsafe manual-control samples. It reports observations and does not
 decide whether a scenario passed.
+The runner's compact summary includes the maximum first-contact speed measured
+for a landing-rail-to-floor interval when that telemetry is available.
 
 For hover measurements, write a small JSON checkpoint file based on the
 requested scenario. Coordinates are launch-facing forward, right, and
@@ -56,5 +58,5 @@ the task needs other evidence.
 
 Inspect collision names against the drone SDF: body-to-floor contact is
 different from landing gear touching the floor. Use the measured state and
-position context to write the task's own touchdown assertion. Store structured
+position context, including first-contact speed, to write the task's own touchdown assertion. Store structured
 observed values and evidence timestamps in the scenario result.
