@@ -27,6 +27,8 @@ from simulation.evidence import (
     wait_for_recording,
 )
 
+SIMULATION_LOCK_PATH = Path("/tmp/athena-ros2-simulation.lock")
+
 
 class SpawnPose(BaseModel):
     """Gazebo world pose in metres and radians."""
@@ -309,7 +311,7 @@ def _generate_flight_report(run_dir: Path, run_env: dict[str, str], result: dict
                     and any("base_link_collision_3" in name or "base_link_collision_4" in name
                             for name in pair)):
                 continue
-            position = contact.get("time_context", {}).get("position_at_start", {})
+            position = (contact.get("time_context") or {}).get("position_at_start") or {}
             speed = position.get("speed_m_s")
             if isinstance(speed, (int, float)) and math.isfinite(speed):
                 gear_floor_speeds.append(float(speed))
@@ -323,7 +325,7 @@ def _generate_flight_report(run_dir: Path, run_env: dict[str, str], result: dict
         }
         result["artifacts"]["flight_report"] = str(report_path)
         result["flight_report"] = {"path": str(report_path), "summary": summary}
-    except (OSError, ValueError, KeyError, TypeError, RuntimeError,
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError,
             subprocess.TimeoutExpired) as exc:
         result["flight_report"] = {"path": str(report_path), "error": f"{type(exc).__name__}: {exc}"}
         result["diagnostics"].append("Flight report generation failed: " + result["flight_report"]["error"])
@@ -428,7 +430,7 @@ def run_test(
         if source_repository_path is not None:
             _require_application_in_source(source_repository_path, application_launch.package)
         # PX4, XRCE, and the Gazebo service names are shared across workspaces.
-        lock = Path("/tmp/athena-ros2-simulation.lock").open("w")  # noqa: SIM115 - released in finally.
+        lock = SIMULATION_LOCK_PATH.open("w")
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -609,36 +611,38 @@ def run_test(
             result["timed_out"] = True
             result["timeout_phase"] = result["last_phase"]
     finally:
-        result["process_exit_codes"] = {name: process.poll() for name, process in processes.items()}
-        cleanup_codes = {name: _stop(process) for name, process in reversed(list(processes.items()))}
-        result["cleanup_exit_codes"] = dict(reversed(list(cleanup_codes.items())))
-        remaining = _cleanup_bringup_children(startup_status_path)
-        result["cleanup_remaining_processes"] = remaining
-        if any(remaining.values()):
-            result["diagnostics"].append("Some bringup processes remained after cleanup; inspect cleanup_remaining_processes.")
-        for log in logs:
-            log.close()
-        bag_path = run_dir / "bag"
-        result["recording"]["metadata_written"] = (bag_path / "metadata.yaml").is_file()
-        if result["recording"]["ready"] and not result["recording"]["metadata_written"]:
-            result["diagnostics"].append("Rosbag did not write metadata.yaml; inspect bag.log.")
-        final_status = _read_status(startup_status_path)
-        if final_status:
-            result["readiness"] = final_status.get("readiness", result["readiness"])
-            result["readiness_details"] = final_status.get("readiness_details", result.get("readiness_details", {}))
-            result["bringup_status"] = final_status
-        if source_repository_path is not None:
-            try:
-                result["source_revision_end"] = _source_revision(workspace, source_repository_path)
-                if result["source_revision_end"] != result.get("source_revision"):
-                    result["diagnostics"].append("The source checkout changed during simulation.")
-            except (OSError, ValueError, subprocess.CalledProcessError) as exc:
-                result["diagnostics"].append(f"Could not verify source checkout after simulation: {exc}")
-        _result_path(run_dir).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        if result["recording"]["metadata_written"] and "run_env" in locals():
-            _generate_flight_report(run_dir, run_env, result)
+        try:
+            result["process_exit_codes"] = {name: process.poll() for name, process in processes.items()}
+            cleanup_codes = {name: _stop(process) for name, process in reversed(list(processes.items()))}
+            result["cleanup_exit_codes"] = dict(reversed(list(cleanup_codes.items())))
+            remaining = _cleanup_bringup_children(startup_status_path)
+            result["cleanup_remaining_processes"] = remaining
+            if any(remaining.values()):
+                result["diagnostics"].append("Some bringup processes remained after cleanup; inspect cleanup_remaining_processes.")
+            for log in logs:
+                log.close()
+            bag_path = run_dir / "bag"
+            result["recording"]["metadata_written"] = (bag_path / "metadata.yaml").is_file()
+            if result["recording"]["ready"] and not result["recording"]["metadata_written"]:
+                result["diagnostics"].append("Rosbag did not write metadata.yaml; inspect bag.log.")
+            final_status = _read_status(startup_status_path)
+            if final_status:
+                result["readiness"] = final_status.get("readiness", result["readiness"])
+                result["readiness_details"] = final_status.get("readiness_details", result.get("readiness_details", {}))
+                result["bringup_status"] = final_status
+            if source_repository_path is not None:
+                try:
+                    result["source_revision_end"] = _source_revision(workspace, source_repository_path)
+                    if result["source_revision_end"] != result.get("source_revision"):
+                        result["diagnostics"].append("The source checkout changed during simulation.")
+                except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+                    result["diagnostics"].append(f"Could not verify source checkout after simulation: {exc}")
             _result_path(run_dir).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        if lock is not None:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            lock.close()
+            if result["recording"]["metadata_written"] and "run_env" in locals():
+                _generate_flight_report(run_dir, run_env, result)
+                _result_path(run_dir).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        finally:
+            if lock is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                lock.close()
     return result

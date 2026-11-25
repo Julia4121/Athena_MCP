@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import subprocess
 from pathlib import Path
 
+import pytest
 from simulation import runner
 
 
@@ -36,6 +38,9 @@ def test_auto_report_returns_compact_summary(monkeypatch, tmp_path: Path) -> Non
                 {"collision_a": "drone::base_link::base_link_collision_0",
                  "collision_b": "room::room_link::floor_collision",
                  "time_context": {"position_at_start": {"speed_m_s": 2.5}}},
+                {"collision_a": "drone::base_link::base_link_collision_3",
+                 "collision_b": "room::room_link::floor_collision",
+                 "time_context": {"position_at_start": None}},
             ], "battery": {
                 "/fmu/out/battery_status": {"readings": [{"values": {"remaining": 0.35}}]},
             },
@@ -61,3 +66,36 @@ def test_auto_report_failure_is_diagnostic(monkeypatch, tmp_path: Path) -> None:
     assert "bag unreadable" in result["flight_report"]["error"]
     assert "flight_report" not in result["artifacts"]
     assert "Flight report generation failed" in result["diagnostics"][0]
+
+
+def test_runner_releases_simulation_lock_when_finalization_fails(monkeypatch, tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    drone = tmp_path / "drone.sdf"
+    world = tmp_path / "world.sdf"
+    drone.write_text("drone", encoding="utf-8")
+    world.write_text("world", encoding="utf-8")
+    lock_path = tmp_path / "simulation.lock"
+    monkeypatch.setattr(runner, "SIMULATION_LOCK_PATH", lock_path)
+    monkeypatch.setattr(runner, "_preflight", lambda *_args: None)
+    monkeypatch.setattr(runner, "_source_revision", lambda *_args: None)
+    monkeypatch.setattr(runner, "_effective_drone_sdf", lambda *_args: (drone, False))
+
+    def fail_startup(*_args):
+        raise RuntimeError("startup failed")
+
+    def fail_cleanup(*_args):
+        raise OSError("cleanup failed")
+
+    monkeypatch.setattr(runner, "_source_env", fail_startup)
+    monkeypatch.setattr(runner, "_cleanup_bringup_children", fail_cleanup)
+    with pytest.raises(OSError, match="cleanup failed") as error:
+        runner.run_test(
+            str(workspace), str(drone), str(world),
+            runner.SpawnPose(x_m=0, y_m=0, z_m=0),
+            runner.ApplicationLaunch(package="example", file="example.launch.py"),
+            ["true"],
+        )
+    assert error.value is not None
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
